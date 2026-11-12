@@ -41,3 +41,15 @@ export function deleteSessionByTokenHash(db: Db, tokenHash: string): void {
 export function deleteExpiredSessions(db: Db, nowSec: number): number {
   return db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(nowSec).changes
 }
+
+/** Deletes every session of `userId`, except `keepSessionId` when given. Returns the number deleted. */
+export function deleteUserSessions(db: Db, userId: string, keepSessionId?: string): number {
+  if (keepSessionId === undefined) {
+    return db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId).changes
+  }
+  return db.prepare('DELETE FROM sessions WHERE user_id = ? AND id <> ?').run(userId, keepSessionId).changes
+}
+
+export function sessionExists(db: Db, sessionId: string): boolean {
+  return db.prepare('SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ?)').pluck().get(sessionId) === 1
+}

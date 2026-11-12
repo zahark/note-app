@@ -1,15 +1,30 @@
 import { createHmac, randomBytes } from 'node:crypto'
 import type { Config } from '../config.js'
 import type { Db } from '../db/index.js'
-import { AppError, conflict, tooManyRequests } from '../errors.js'
-import { createKnownDevice, findKnownDevice, touchKnownDevice, type KnownDeviceRow } from '../repos/knownDevices.js'
+import { AppError, conflict, tooManyRequests, unauthorized } from '../errors.js'
+import {
+  createKnownDevice,
+  deleteUserKnownDevices,
+  findKnownDevice,
+  touchKnownDevice,
+  type KnownDeviceRow,
+} from '../repos/knownDevices.js'
 import {
   createSession,
   deleteExpiredSessions,
   deleteSessionByTokenHash,
+  deleteUserSessions,
   findSession,
+  sessionExists,
 } from '../repos/sessions.js'
-import { createUser, EmailTakenError, findUserByEmail, type UserRow } from '../repos/users.js'
+import {
+  createUser,
+  EmailTakenError,
+  findUserByEmail,
+  findUserById,
+  updatePasswordHash,
+  type UserRow,
+} from '../repos/users.js'
 import { HashLimiter } from './hashLimiter.js'
 import { ipKey } from './ipKey.js'
 import { LoginGate } from './loginGate.js'
@@ -27,6 +42,7 @@ export const AUTH_LIMITS = {
   loginSuccessesPerAccount: { limit: 20, windowMs: 15 * MINUTE },
   loginSuccessesPerIp: { limit: 20, windowMs: 15 * MINUTE },
   signupsPerIp: { limit: 5, windowMs: 60 * MINUTE },
+  changePasswordPerUser: { limit: 5, windowMs: 15 * MINUTE },
 } as const
 
 /** The authenticated user as exposed to routes and the API. */
@@ -52,6 +68,13 @@ export interface Credentials {
   ip: string
   /** Raw device-cookie value, if the browser sent one. */
   deviceToken?: string | undefined
+}
+
+export interface ChangePasswordInput {
+  /** The signed-in user (from `requireAuth`); their current session is kept. */
+  user: AuthUser & { sessionId: string }
+  currentPassword: string
+  newPassword: string
 }
 
 export interface AuthServiceOptions {
@@ -95,6 +118,7 @@ export class AuthService {
       loginSuccessesPerAccount: limiter(AUTH_LIMITS.loginSuccessesPerAccount),
       loginSuccessesPerIp: limiter(AUTH_LIMITS.loginSuccessesPerIp),
       signupsPerIp: limiter(AUTH_LIMITS.signupsPerIp),
+      changePasswordPerUser: limiter(AUTH_LIMITS.changePasswordPerUser),
     }
   }
 
@@ -194,6 +218,37 @@ export class AuthService {
       createKnownDevice(this.db, user.id, this.tokenHash(deviceToken), nowSec)
     }
     return { user: toAuthUser(user), sessionToken, deviceToken }
+  }
+
+  /**
+   * Changes the signed-in user's password. Every other session and every known device of the user is
+   * dropped; the current session is kept and gets a fresh device, whose raw token is returned for the
+   * device cookie. Limited to 5 attempts / 15 min per user, checked before any argon2 work. Only an owner
+   * session may use the reserved hash slot.
+   */
+  async changePassword({ user, currentPassword, newPassword }: ChangePasswordInput): Promise<{ deviceToken: string }> {
+    this.enforce(this.limits.changePasswordPerUser, user.id)
+    assertValidPassword(newPassword)
+    this.limits.changePasswordPerUser.hit(user.id)
+
+    const row = findUserById(this.db, user.id)
+    if (!row) throw unauthorized()
+    const reserved = row.is_owner === 1
+    if (!(await this.passwords.verify(row.password_hash, currentPassword, { reserved }))) {
+      throw new AppError(403, 'WRONG_PASSWORD', 'Current password is incorrect')
+    }
+    const hash = await this.passwords.hash(newPassword, { reserved })
+
+    const deviceToken = randomBytes(32).toString('base64url')
+    this.db.transaction(() => {
+      // the session may have been revoked (logout, reset CLI) while we were hashing
+      if (!sessionExists(this.db, user.sessionId)) throw unauthorized()
+      updatePasswordHash(this.db, user.id, hash)
+      deleteUserSessions(this.db, user.id, user.sessionId)
+      deleteUserKnownDevices(this.db, user.id)
+      createKnownDevice(this.db, user.id, this.tokenHash(deviceToken), this.nowSec())
+    }).immediate()
+    return { deviceToken }
   }
 
   /** Deletes the session for `sessionToken`, if any. */

@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppError } from '../src/errors.js'
 import { HashLimiter } from '../src/services/hashLimiter.js'
 import {
+  changePassword,
   closeApp,
   cookieValue,
   errorCode,
   login,
   makeApp,
+  PASSWORD,
   seedUser,
   signup,
   type TestApp,
@@ -96,13 +98,19 @@ describe('reserved owner slot (HTTP)', () => {
   let t: TestApp
   let ownerDid: string
   let secondDid: string
+  let ownerSid: string
+  let secondSid: string
 
   beforeEach(async () => {
     t = await makeApp({ hashWaitMs: 50 })
     seedUser(t.db, 'owner@example.com')
     seedUser(t.db, 'second@example.com')
-    ownerDid = cookieValue(await login(t.app, { email: 'owner@example.com' }), 'did')
-    secondDid = cookieValue(await login(t.app, { email: 'second@example.com' }), 'did')
+    const ownerLogin = await login(t.app, { email: 'owner@example.com' })
+    const secondLogin = await login(t.app, { email: 'second@example.com' })
+    ownerDid = cookieValue(ownerLogin, 'did')
+    ownerSid = cookieValue(ownerLogin, 'sid')
+    secondDid = cookieValue(secondLogin, 'did')
+    secondSid = cookieValue(secondLogin, 'sid')
     t.hasher.blocked.add(BLOCK)
   })
 
@@ -142,6 +150,37 @@ describe('reserved owner slot (HTTP)', () => {
       expect(res.statusCode).toBe(503)
       expect(errorCode(res)).toBe('BUSY')
     }
+    t.hasher.release()
+    await Promise.all(held)
+  })
+
+  it('a non-owner flooding change-password cannot take the reserved slot; the owner known-device login still succeeds', async () => {
+    const held = await holdGeneralSlots()
+    const flood = Array.from({ length: 5 }, () =>
+      changePassword(t.app, { sid: secondSid, newPassword: 'flooded new password' }),
+    )
+    const owner = await login(t.app, { email: 'owner@example.com', ip: '192.0.2.50', cookies: { did: ownerDid } })
+    expect(owner.statusCode).toBe(200)
+    const floodResults = await Promise.all(flood)
+    for (const res of floodResults) {
+      expect(res.statusCode).toBe(503)
+      expect(errorCode(res)).toBe('BUSY')
+    }
+    // nothing changed for the flooding account
+    expect(t.db.prepare('SELECT password_hash FROM users WHERE email = ?').pluck().get('second@example.com')).toBe(
+      `fake$${PASSWORD}`,
+    )
+    t.hasher.release()
+    await Promise.all(held)
+  })
+
+  it('the owner’s own change-password can use the reserved slot while all general slots are held', async () => {
+    const held = await holdGeneralSlots()
+    const res = await changePassword(t.app, { sid: ownerSid, newPassword: 'owner new password' })
+    expect(res.statusCode).toBe(204)
+    expect(t.db.prepare('SELECT password_hash FROM users WHERE email = ?').pluck().get('owner@example.com')).toBe(
+      'fake$owner new password',
+    )
     t.hasher.release()
     await Promise.all(held)
   })

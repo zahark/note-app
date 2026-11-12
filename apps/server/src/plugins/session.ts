@@ -36,6 +36,11 @@ export function setAuthCookies(reply: FastifyReply, config: Config, result: Auth
   reply.setCookie(DEVICE_COOKIE, result.deviceToken, cookieOptions(config, DEVICE_TTL_SEC))
 }
 
+/** Replaces the device cookie (after a password change issues a fresh device). */
+export function setDeviceCookie(reply: FastifyReply, config: Config, deviceToken: string): void {
+  reply.setCookie(DEVICE_COOKIE, deviceToken, cookieOptions(config, DEVICE_TTL_SEC))
+}
+
 export function clearSessionCookie(reply: FastifyReply, config: Config): void {
   reply.clearCookie(SESSION_COOKIE, cookieOptions(config, 0))
 }

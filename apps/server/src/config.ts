@@ -2,6 +2,9 @@ import { isIP } from 'node:net'
 import path from 'node:path'
 import { z } from 'zod'
 
+/** DATA_DIR when unset, resolved against the working directory. */
+export const DEFAULT_DATA_DIR = './data'
+
 /** Minimum length for SESSION_SECRET and SHARE_HMAC_KEY. */
 export const MIN_SECRET_LENGTH = 32
 
@@ -123,7 +126,7 @@ const envSchema = z.object({
   PUBLIC_ORIGIN: publicOrigin,
   TRUST_PROXY: trustProxy,
   ALLOW_SIGNUP: allowSignup,
-  DATA_DIR: optional(z.string().default('./data')),
+  DATA_DIR: optional(z.string().default(DEFAULT_DATA_DIR)),
   HOST: optional(z.string().default('0.0.0.0')),
   PORT: port,
 })

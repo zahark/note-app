@@ -25,3 +25,16 @@ npm test               # all tests in both apps
 npm run lint           # ESLint + TypeScript type checks
 npm run build          # production build of both apps
 ```
+
+## Password reset
+
+There is no email reset. Signed-in users change their password in the app; an operator with shell
+access to the server resets any account with:
+
+```sh
+npm run build -w apps/server                # once, if dist/ is not built yet
+npm run reset-password -- you@example.com   # prompts twice for the new password, without echo
+```
+
+It uses `DATA_DIR` (relative paths resolve against `apps/server`, like the server itself) and needs no
+secrets. Both the reset and an in-app change revoke the account's other sessions and known devices.

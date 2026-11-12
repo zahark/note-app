@@ -156,3 +156,20 @@ export function cookieValue(res: LightMyRequestResponse, name: string): string {
 
 export const errorCode = (res: LightMyRequestResponse): string =>
   (res.json() as { error: { code: string } }).error.code
+
+export interface ChangePasswordRequest {
+  sid: string
+  currentPassword?: string
+  newPassword: string
+  cookies?: Record<string, string>
+}
+
+export function changePassword(app: FastifyInstance, r: ChangePasswordRequest): Promise<LightMyRequestResponse> {
+  return app.inject({
+    method: 'POST',
+    url: '/api/auth/change-password',
+    headers: { origin: ORIGIN },
+    cookies: { ...r.cookies, sid: r.sid },
+    payload: { currentPassword: r.currentPassword ?? PASSWORD, newPassword: r.newPassword },
+  })
+}

@@ -53,3 +53,7 @@ export function createUser(db: Db, email: string, passwordHash: string): UserRow
   if (!user) throw new Error('user vanished after insert')
   return user
 }
+
+export function updatePasswordHash(db: Db, userId: string, passwordHash: string): void {
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, userId)
+}

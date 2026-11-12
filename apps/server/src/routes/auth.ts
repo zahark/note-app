@@ -1,6 +1,12 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { clearSessionCookie, DEVICE_COOKIE, SESSION_COOKIE, setAuthCookies } from '../plugins/session.js'
+import {
+  clearSessionCookie,
+  DEVICE_COOKIE,
+  SESSION_COOKIE,
+  setAuthCookies,
+  setDeviceCookie,
+} from '../plugins/session.js'
 
 const signupBody = z.object({
   email: z.string().trim().toLowerCase().max(254).pipe(z.email('Invalid email address')),
@@ -14,7 +20,13 @@ const loginBody = z.object({
   password: z.string().min(1).max(1024),
 })
 
-/** `POST /api/auth/signup|login|logout`, `GET /api/auth/me`. */
+const changePasswordBody = z.object({
+  currentPassword: z.string().min(1).max(1024),
+  // the policy is applied by validatePassword in the service
+  newPassword: z.string().max(4096),
+})
+
+/** `POST /api/auth/signup|login|logout|change-password`, `GET /api/auth/me`. */
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/auth/signup', async (request, reply) => {
     const { email, password } = signupBody.parse(request.body)
@@ -38,6 +50,13 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/auth/logout', async (request, reply) => {
     app.auth.logout(request.cookies[SESSION_COOKIE])
     clearSessionCookie(reply, app.config)
+    return reply.status(204).send()
+  })
+
+  app.post('/api/auth/change-password', { preHandler: app.requireAuth }, async (request, reply) => {
+    const { currentPassword, newPassword } = changePasswordBody.parse(request.body)
+    const { deviceToken } = await app.auth.changePassword({ user: request.user!, currentPassword, newPassword })
+    setDeviceCookie(reply, app.config, deviceToken)
     return reply.status(204).send()
   })
 
