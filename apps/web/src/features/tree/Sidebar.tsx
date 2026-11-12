@@ -3,8 +3,11 @@ import { FilePlusIcon, FolderPlusIcon } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { useCreateFolder, useCreateNote, useTree } from './api'
-import { buildTree } from './buildTree'
-import { TreeNode } from './TreeNode'
+import { buildTree, subtreeFolderIds, type TreeItem } from './buildTree'
+import { DeleteDialog } from './DeleteDialog'
+import { MoveDialog } from './MoveDialog'
+import { useDeleteFolder, useDeleteNote, useMoveFolder, useMoveNote, useRenameFolder, useRenameNote } from './mutations'
+import { TreeNode, type TreeHandlers } from './TreeNode'
 import { useExpanded } from './useExpanded'
 
 /** Query-string key holding the open note's id (`/?note=<id>`). */
@@ -13,6 +16,8 @@ export const NOTE_PARAM = 'note'
 /**
  * Sidebar: header with "New note" / "New folder" (created inside the selected folder, or the
  * selected note's folder), the collapsible folder tree, and persistent "new at root" buttons.
+ * Each row has a right-click / "…" menu with inline rename, Move to… and delete (with confirm);
+ * those changes are applied optimistically and rolled back if the server refuses them.
  */
 export function Sidebar() {
   const tree = useTree()
@@ -23,6 +28,15 @@ export function Sidebar() {
   const openNoteId = searchParams.get(NOTE_PARAM)
   // a clicked folder takes the selection; otherwise the open note is the selection
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [moving, setMoving] = useState<TreeItem | null>(null)
+  const [deleting, setDeleting] = useState<TreeItem | null>(null)
+  const renameFolder = useRenameFolder()
+  const renameNote = useRenameNote()
+  const moveFolder = useMoveFolder()
+  const moveNote = useMoveNote()
+  const deleteFolder = useDeleteFolder()
+  const deleteNote = useDeleteNote()
 
   const folders = tree.data?.folders
   const notes = tree.data?.notes
@@ -45,9 +59,55 @@ export function Sidebar() {
     })
   }
 
-  const onFolderClick = (id: string) => {
-    setSelectedFolderId(id)
-    toggle(id)
+  const closeNote = () =>
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete(NOTE_PARAM)
+      return next
+    })
+
+  const commitRename = (item: TreeItem, value: string) => {
+    setRenamingId(null)
+    if (item.kind === 'folder') {
+      const name = value.trim()
+      // an empty folder name is not allowed: keep the old one
+      if (name && name !== item.folder.name) renameFolder.mutate({ id: item.id, name })
+    } else if (value !== item.note.title) {
+      renameNote.mutate({ id: item.id, title: value })
+    }
+  }
+
+  const move = (item: TreeItem, target: string | null) => {
+    if (item.kind === 'folder') moveFolder.mutate({ id: item.id, parentFolderId: target })
+    else moveNote.mutate({ id: item.id, folderId: target })
+    // keep the moved item in view
+    if (target) expand(target)
+  }
+
+  const remove = (item: TreeItem) => {
+    if (item.kind === 'folder') {
+      const removed = subtreeFolderIds(folders ?? [], item.id)
+      const openNoteFolder = notes?.find((n) => n.id === openNoteId)?.folder_id
+      if (openNoteFolder && removed.has(openNoteFolder)) closeNote()
+      if (selectedFolderId && removed.has(selectedFolderId)) setSelectedFolderId(null)
+      deleteFolder.mutate({ id: item.id })
+    } else {
+      if (item.id === openNoteId) closeNote()
+      deleteNote.mutate({ id: item.id })
+    }
+  }
+
+  const handlers: TreeHandlers = {
+    onFolderClick: (id) => {
+      setSelectedFolderId(id)
+      toggle(id)
+    },
+    onNoteClick: openNote,
+    onRename: (item) => setRenamingId(item.id),
+    onRenameCommit: commitRename,
+    onRenameCancel: () => setRenamingId(null),
+    onMove: setMoving,
+    onDelete: setDeleting,
   }
 
   const newNote = (folderId: string | null) =>
@@ -68,6 +128,8 @@ export function Sidebar() {
         onSuccess: ({ folder }) => {
           if (parentFolderId) expand(parentFolderId)
           setSelectedFolderId(folder.id)
+          // created with a default name: let the user type the real one right away
+          setRenamingId(folder.id)
         },
       },
     )
@@ -126,8 +188,8 @@ export function Sidebar() {
                 item={item}
                 expanded={expanded}
                 selectedId={selectedId}
-                onFolderClick={onFolderClick}
-                onNoteClick={openNote}
+                renamingId={renamingId}
+                handlers={handlers}
               />
             ))}
           </ul>
@@ -144,6 +206,9 @@ export function Sidebar() {
           Folder at root
         </Button>
       </div>
+
+      <MoveDialog item={moving} tree={tree.data} onOpenChange={(open) => !open && setMoving(null)} onMove={move} />
+      <DeleteDialog item={deleting} tree={tree.data} onOpenChange={(open) => !open && setDeleting(null)} onConfirm={remove} />
     </>
   )
 }

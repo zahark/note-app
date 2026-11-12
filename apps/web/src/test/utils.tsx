@@ -19,10 +19,11 @@ export interface RecordedRequest {
   init: RequestInit
 }
 
-type Handler = (req: RecordedRequest) => MockResponse | undefined
+type Handler = (req: RecordedRequest) => MockResponse | undefined | Promise<MockResponse | undefined>
 
 /**
  * Replaces `fetch` with a router over `"METHOD /path"` keys. Unmatched requests get a 404 error body.
+ * A handler may return a promise, to hold a response back until the test releases it.
  * Returns the list of requests made, for assertions.
  */
 export function mockFetch(routes: Record<string, MockResponse | Handler>) {
@@ -34,7 +35,7 @@ export function mockFetch(routes: Record<string, MockResponse | Handler>) {
     const req = { method, path, body, init }
     requests.push(req)
     const route = routes[`${method} ${path}`]
-    const res = (typeof route === 'function' ? route(req) : route) ?? {
+    const res = (typeof route === 'function' ? await route(req) : route) ?? {
       status: 404,
       body: { error: { code: 'NOT_FOUND', message: 'Not found' } },
     }

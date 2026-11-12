@@ -133,3 +133,37 @@ export function collectFolderIds(items: TreeItem[]): string[] {
   walk(items)
   return ids
 }
+
+/**
+ * Ids of folder `rootId` and every folder below it (by `parent_folder_id`). Cycle-safe: each folder
+ * is visited once. Used to keep a folder out of its own subtree (Move-to, drop targets).
+ */
+export function subtreeFolderIds(folders: TreeFolder[], rootId: string): Set<string> {
+  const childrenOf = new Map<string, string[]>()
+  for (const f of folders) {
+    if (f.parent_folder_id === null) continue
+    const list = childrenOf.get(f.parent_folder_id)
+    if (list) list.push(f.id)
+    else childrenOf.set(f.parent_folder_id, [f.id])
+  }
+  const ids = new Set<string>([rootId])
+  const stack = [rootId]
+  while (stack.length > 0) {
+    for (const child of childrenOf.get(stack.pop()!) ?? []) {
+      if (!ids.has(child)) {
+        ids.add(child)
+        stack.push(child)
+      }
+    }
+  }
+  return ids
+}
+
+/** What deleting folder `folderId` removes besides the folder itself: its subfolders and notes at any depth. */
+export function countFolderContents(tree: TreeData, folderId: string): { folders: number; notes: number } {
+  const ids = subtreeFolderIds(tree.folders, folderId)
+  return {
+    folders: ids.size - 1,
+    notes: tree.notes.filter((n) => n.folder_id !== null && ids.has(n.folder_id)).length,
+  }
+}

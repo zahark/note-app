@@ -16,7 +16,8 @@ export function useTree() {
 /** Name given to a folder created from the sidebar (renamed inline afterwards). */
 export const NEW_FOLDER_NAME = 'New folder'
 
-const errorMessage = (err: unknown) => (err instanceof Error ? err.message : 'Something went wrong')
+/** A user-facing message for a failed request. */
+export const errorMessage = (err: unknown) => (err instanceof Error ? err.message : 'Something went wrong')
 
 /** Creates a folder (in `parentFolderId`, or the root for null) and adds it to the cached tree. */
 export function useCreateFolder() {
