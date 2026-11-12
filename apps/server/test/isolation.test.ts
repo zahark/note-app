@@ -150,6 +150,27 @@ const ENDPOINTS: Endpoint[] = [
     name: "path = A's attachment",
     url: (i) => `/api/attachments/${i.aliceAttachment}`,
   },
+  // sharing (Task 10); A's note is already link-shared, so a wrongly accepted call would change it
+  {
+    method: 'POST',
+    route: '/api/notes/:id/share',
+    name: "path = A's note, PIN share",
+    url: (i) => `/api/notes/${i.aliceNote}/share`,
+    body: () => ({ type: 'password_protected' }),
+  },
+  {
+    method: 'POST',
+    route: '/api/notes/:id/share',
+    name: "path = A's note, signed link",
+    url: (i) => `/api/notes/${i.aliceNote}/share`,
+    body: () => ({ type: 'signed_url', expires_in: '30d' }),
+  },
+  {
+    method: 'DELETE',
+    route: '/api/notes/:id/share',
+    name: "path = A's note",
+    url: (i) => `/api/notes/${i.aliceNote}/share`,
+  },
 ]
 
 /** Private routes that take no id at all; each has its own scoping test below. */
@@ -200,6 +221,11 @@ async function seed(): Promise<Ids> {
     version: 1,
   })
   expect(saved.statusCode).toBe(200)
+  const shared = await api(t.app, alice, 'POST', `/api/notes/${aliceNote}/share`, {
+    type: 'signed_url',
+    expires_in: '1d',
+  })
+  expect(shared.statusCode).toBe(200)
   return {
     aliceFolder,
     aliceNote,

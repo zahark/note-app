@@ -1,8 +1,30 @@
 // The ONLY repo module allowed to query without a userId. Every function here documents why it is
 // unscoped. It is read-only apart from the attachment sweep's deletes.
 //
-// Task 9 adds the sweep queries; Task 11 adds the public share lookups.
+// Task 9 adds the sweep queries; Task 10 adds the share-state lookup used by unlock and link/token
+// verification; Task 11 adds the remaining public share lookups.
 import type { Db } from '../db/index.js'
+import type { ShareType } from './notes.js'
+
+/** The sharing columns of a note: everything the public share checks need, and nothing else. */
+export interface NoteShareState {
+  id: string
+  share_type: ShareType
+  /** argon2 hash of the PIN, or the signing nonce; null when private. */
+  share_secret: string | null
+  expires_at: number | null
+}
+
+/**
+ * The sharing state of note `noteId`, or undefined when there is no such note.
+ * Unscoped because the public shared API (PIN unlock, token and signed-link checks) runs for anonymous
+ * visitors: there is no user identity, the share secret itself is the authorization.
+ */
+export function getNoteShareState(db: Db, noteId: string): NoteShareState | undefined {
+  return db
+    .prepare('SELECT id, share_type, share_secret, expires_at FROM notes WHERE id = ?')
+    .get(noteId) as NoteShareState | undefined
+}
 
 /**
  * Deletes every attachment row that no note references and whose last activity

@@ -147,3 +147,29 @@ export function updateNoteFolder(db: Db, userId: string, noteId: string, folderI
       .run({ id: noteId, userId, folder: folderId }).changes === 1
   )
 }
+
+/** A note's sharing settings, as stored on the note row. */
+export interface ShareSettings {
+  type: ShareType
+  /** argon2 hash of the PIN (`password_protected`), the signing nonce (`signed_url`), or null (`private`). */
+  secret: string | null
+  /** Unix seconds when a signed link expires; null for PIN shares and private notes. */
+  expiresAt: number | null
+}
+
+/**
+ * Replaces the note's sharing settings. Neither `version` nor `updated_at` changes (sharing is not a
+ * content edit). Returns false, changing nothing, when the note is not the caller's.
+ */
+export function updateNoteShare(db: Db, userId: string, noteId: string, share: ShareSettings): boolean {
+  requireUserId(userId)
+  return (
+    db
+      .prepare(
+        `UPDATE notes SET share_type = @type, share_secret = @secret, expires_at = @expiresAt
+          WHERE id = @id AND user_id = @userId`,
+      )
+      .run({ id: noteId, userId, type: share.type, secret: share.secret, expiresAt: share.expiresAt })
+      .changes === 1
+  )
+}

@@ -7,12 +7,14 @@ import { attachmentRoutes } from './routes/attachments.js'
 import { authRoutes } from './routes/auth.js'
 import { folderRoutes } from './routes/folders.js'
 import { noteRoutes } from './routes/notes.js'
+import { shareRoutes } from './routes/share.js'
 import { treeRoutes } from './routes/tree.js'
 import { sweepAttachments } from './services/attachments.js'
 import { AuthService } from './services/auth.js'
 import type { HashLimiter } from './services/hashLimiter.js'
 import type { PasswordHasher } from './services/password.js'
 import type { Clock } from './services/ratelimit.js'
+import { ShareService } from './services/share.js'
 
 export interface BuildAppOptions {
   config: Config
@@ -20,7 +22,10 @@ export interface BuildAppOptions {
   db: Db
   /** Fastify logger setting; off by default so tests stay quiet. */
   logger?: FastifyServerOptions['logger']
-  /** Test seams for the auth service; production uses argon2id, the default limiter and the real clock. */
+  /**
+   * Test seams for the auth service (and the share service, which shares its hasher, limiter and clock);
+   * production uses argon2id, the default limiter and the real clock.
+   */
   auth?: { hasher?: PasswordHasher; hashLimiter?: HashLimiter; now?: Clock }
   /**
    * Run the attachment sweep once when the app is ready and then daily. Off by default so tests never
@@ -36,6 +41,7 @@ declare module 'fastify' {
   interface FastifyInstance {
     config: Config
     db: Db
+    share: ShareService
   }
 }
 
@@ -76,7 +82,10 @@ export function buildApp({
   )
 
   // cookies, the CSRF Origin check and the auth guard come before every route
-  registerSession(app, new AuthService({ db, config, ...auth }))
+  const authService = new AuthService({ db, config, ...auth })
+  registerSession(app, authService)
+  // PIN hashing and unlock verification go through the same argon2 concurrency cap as passwords
+  app.decorate('share', new ShareService({ db, config, passwords: authService.passwords, now: auth.now }))
 
   app.get('/api/health', async () => ({ status: 'ok' }))
   app.register(authRoutes)
@@ -85,6 +94,7 @@ export function buildApp({
   app.register(folderRoutes)
   app.register(noteRoutes)
   app.register(attachmentRoutes)
+  app.register(shareRoutes)
 
   if (attachmentSweep) scheduleAttachmentSweep(app)
 

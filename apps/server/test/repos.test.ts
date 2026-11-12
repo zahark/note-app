@@ -29,6 +29,7 @@ import {
   renameNote,
   saveNoteContent,
   updateNoteFolder,
+  updateNoteShare,
 } from '../src/repos/notes.js'
 import { MissingUserIdError } from '../src/repos/scope.js'
 import { createUser } from '../src/repos/users.js'
@@ -98,6 +99,7 @@ describe('owner-scoped repos require a userId', () => {
         'notes.saveNoteContent',
         'notes.deleteNote',
         'notes.updateNoteFolder',
+        'notes.updateNoteShare',
         'attachments.createAttachment',
         'attachments.getAttachment',
         'attachments.setNoteAttachments',
@@ -315,6 +317,28 @@ describe('notes repo', () => {
     const note = createNote(db, alice, { folderId: null })!
     expect(deleteNote(db, alice, note.id)).toBe(true)
     expect(getNote(db, alice, note.id)).toBeUndefined()
+  })
+
+  it('updates only the caller’s share settings, leaving version and updated_at alone', () => {
+    const note = createNote(db, alice, { folderId: null })!
+    const shareRow = () =>
+      db.prepare('SELECT share_type, share_secret, expires_at, version, updated_at FROM notes WHERE id = ?').get(note.id)
+    const before = shareRow()
+    const signed = { type: 'signed_url', secret: 'nonce', expiresAt: 2_000_000_000 } as const
+    expect(updateNoteShare(db, bob, note.id, signed)).toBe(false)
+    expect(updateNoteShare(db, alice, randomUUID(), signed)).toBe(false)
+    expect(shareRow()).toEqual(before)
+
+    expect(updateNoteShare(db, alice, note.id, signed)).toBe(true)
+    expect(shareRow()).toEqual({
+      share_type: 'signed_url',
+      share_secret: 'nonce',
+      expires_at: 2_000_000_000,
+      version: note.version,
+      updated_at: note.updated_at,
+    })
+    expect(updateNoteShare(db, alice, note.id, { type: 'private', secret: null, expiresAt: null })).toBe(true)
+    expect(shareRow()).toMatchObject({ share_type: 'private', share_secret: null, expires_at: null })
   })
 })
 
