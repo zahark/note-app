@@ -67,6 +67,21 @@ installed before ready, used by the isolation coverage check) and `hashWaitMs`.
   `flushAllSaves()` before calling `/api/auth/logout`.
 - Images in the editor are only ever `attachment://<aid>`: the parse rule drops any other `<img>`, and
   the node view never loads a non-attachment src.
+- PDF/GPX attachments are the `AttachmentFile` block node (`features/editor/AttachmentFile.ts`, atom,
+  attrs `src` = `attachment://<aid>`, `name`, `size`, `kind` `pdf|gpx`) with the same clipboard rules as
+  images (`data-attachment-id`; a pasted file block without an `attachment://` reference is dropped).
+  `name`/`size`/`kind` are untrusted display text, set with `textContent` only. Node options
+  `{resolveAttachment, downloadAttachment}`: the owner downloads via an anchor to
+  `/api/attachments/:aid` (`downloadOwnerAttachment`), the shared view via
+  `createSharedAttachmentResolver(...).download` (credentialed fetch + blob URL, token never in a URL).
+- Uploads are routed by kind on the client (`uploadKindOf`/`checkUploadFile` in `features/editor/api.ts`:
+  image types first, then `.pdf`/`.gpx` by type or extension, since browsers often report GPX as `''`);
+  the per-kind limits there mirror the server's. `uploadAttachment` is the single upload call.
+- PDF.js is touched only by `features/editor/pdf.ts` (`loadPdf(ArrayBuffer)`): `pdfjs-dist` and its
+  worker (`?url`, same origin) are dynamic imports, so they stay in a lazy chunk out of the main bundle;
+  bytes are passed as an `ArrayBuffer`, never a URL; canvas-only rendering, `enableXfa: false` (PDF.js 6
+  has no `isEvalSupported`). Tests mock `pdf.ts`. The plain-DOM node view mounts the React `PdfViewer`
+  through `mountPdfViewer` (`pdfViewerMount.ts`, own React root per mount).
 
 ## Authorization: owner-scoped repos (security-critical)
 
@@ -107,9 +122,20 @@ installed before ready, used by the isolation coverage check) and `hashWaitMs`.
   on build); never edit an applied migration.
 - `notes.version` guards **content only**: `PUT /api/notes/:id/content {content, version}` increments
   it, stale → 409. Renames and moves use separate endpoints that neither send nor change `version`.
-- Images are stored in content as `attachment://<aid>`; never store a real URL. Attachments belong to
-  the user; `note_attachments` is rebuilt from the content on every save (foreign ids ignored), and
-  only the sweep deletes files (7 days after the last reference is gone).
+- Images and files are stored in content as `attachment://<aid>`; never store a real URL. Attachments
+  belong to the user; `note_attachments` is rebuilt from the content on every save (foreign ids
+  ignored), and only the sweep deletes files (7 days after the last reference is gone).
+- Attachment kinds are detected from content only (`detectAttachmentKind` in
+  `services/attachments.ts`): image magic bytes (`MAX_IMAGE_BYTES` 10 MiB), `%PDF-` (`MAX_FILE_BYTES`
+  25 MiB), GPX = UTF-8 (optional BOM) whose root element is literally `gpx`, rejected on any
+  `<!DOCTYPE`/`<!ENTITY` in the first 64 KiB (25 MiB); anything else is 415. The multipart limit is
+  `MAX_UPLOAD_BYTES` (the larger); the per-kind check runs after detection. Quota and `UPLOAD_LIMIT`
+  cover every kind; no schema change (`mime` + `original_name`).
+- File responses (owner and shared routes) get their headers only from `attachmentResponseHeaders`
+  (`services/attachments.ts`): images inline + `nosniff`; every non-image kind is always a download
+  (`contentDisposition(original_name)`: ASCII `filename=` fallback + `filename*=UTF-8''…`) with
+  `nosniff` and `Content-Security-Policy: sandbox`. The page CSP (`app.ts`) has
+  `connect-src 'self' blob:` for the shared PDF viewer; never add `unsafe-eval`.
 - Signup (`ALLOW_SIGNUP` → `config.signupMode`) defaults to `first-user`: open only while `users` is
   empty. `createUser(..., {onlyIfFirst})` re-checks emptiness inside the IMMEDIATE insert transaction, so
   of simultaneous first signups exactly one succeeds. Tests that sign up more than one account via the

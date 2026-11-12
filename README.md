@@ -12,6 +12,16 @@ serves the API and the built SPA, and all state lives in one data directory.
   touch screens have no drag — long-press an item or use its "…" menu → "Move to…".
 - TipTap rich-text editor with debounced autosave (a stale save gets a conflict prompt instead of
   overwriting) and image upload by button, drag or paste (PNG/JPEG/WebP/GIF, 10 MB max).
+- File attachments by the toolbar's **Attach file** button, drag or paste (the server checks each
+  file's content, never its name or declared type):
+  - **PDF** (25 MB max): a small in-note viewer (one page at a time, previous/next, "page i of n") plus
+    a Download button. The viewer (PDF.js) is a separate chunk loaded only when a note shows a PDF,
+    with its worker served from the app's own origin; it draws pages to a canvas only (no links, forms
+    or PDF scripts).
+  - **GPX** (25 MB max, UTF-8 text): a file chip with name, size and a Download button; no preview.
+    GPX files with a `<!DOCTYPE>` or `<!ENTITY>` are rejected.
+  - Both work in shared notes too (the viewer and downloads use the share's PIN unlock or signed link,
+    which never appears in a URL), and the download keeps the original file name.
 - Sharing with no public access by default, per note, from the **Share** button in the open note's
   header:
   - **PIN**: an 8-character PIN shown once; visitors unlock a read-only view (5 wrong PINs per note
@@ -23,7 +33,8 @@ serves the API and the built SPA, and all state lives in one data directory.
   the command line. The first account created is the **owner**; by default nobody else can sign up. A session lasts 30 days and is renewed
   to a fresh 30 days while you keep using the app (once less than half of it is left); a browser stays
   a known device for 1 year after its last login.
-- One container, one data directory: SQLite database plus uploaded images, backed up with one command.
+- One container, one data directory: SQLite database plus uploaded images and files, backed up with
+  one command.
 
 ## Quick start (Docker)
 
@@ -64,7 +75,7 @@ validates them at boot and refuses to start on any problem, listing every one.
 | `HOST` | `0.0.0.0` | Listen address. |
 | `PORT` | `3000` | Listen port. |
 | `LOG_LEVEL` | `info` | `fatal` … `trace`; `debug` logs each request's client address and rate-limit IP key. |
-| `UPLOAD_QUOTA_MB` | `1024` | Most image storage one account may use, in MB (integer; `0` = no limit). Uploads past it get 413 `QUOTA_EXCEEDED`. Removed images still count until the sweep deletes them, 7 days after removal. |
+| `UPLOAD_QUOTA_MB` | `1024` | Most attachment storage (images, PDF and GPX files together) one account may use, in MB (integer; `0` = no limit). Uploads past it get 413 `QUOTA_EXCEEDED`. Removed attachments still count until the sweep deletes them, 7 days after removal. |
 | `CLOUDFLARE_TUNNEL_TOKEN` | unset | `compose.tunnel.yml` only. |
 
 ## Development
@@ -132,7 +143,8 @@ key per request. Every override above follows it; keep it if you write your own.
   nginx or tunnel override.
 - **nginx**: proxy to `http://127.0.0.1:3000` with
   `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` and `proxy_set_header Host $host;`,
-  set `client_max_body_size 12m;` for image uploads, and terminate TLS there
+  set `client_max_body_size 27m;` (PDF/GPX uploads are up to 25 MB, images up to 10 MB, plus the
+  multipart overhead), and terminate TLS there
   (`PUBLIC_ORIGIN=https://...`).
 - **Cloudflare Tunnel**: create a tunnel in the Zero Trust dashboard, point its public hostname at
   `http://app:3000`, and put the token in `.env` as `CLOUDFLARE_TUNNEL_TOKEN`. `cloudflared` runs at the
@@ -162,7 +174,7 @@ the host first, or the app cannot write to it.
   - successful logins: 20 per 15 minutes per account and per IP key;
   - signups: 5 per hour per IP key; password changes: 5 per 15 minutes per account;
   - PIN unlocks: 30 attempts per 15 minutes per IP key, 5 wrong PINs per 15 minutes per note.
-  - image uploads: 100 per 15 minutes per account;
+  - uploads (images, PDF and GPX files together): 100 per 15 minutes per account;
   - note creation: 60 per 15 minutes per account; note content saves: 600 per 15 minutes per account
     (autosave saves at most about once a second while you type, and retries a refused save).
 - All rate-limit state is kept in memory: a restart clears it, and the app must run as a **single
@@ -171,10 +183,19 @@ the host first, or the app cannot write to it.
   unused session expires after 15 to 30 days. Known devices expire 1 year after their last login.
 - Signup is open only until the first account (the owner) exists, unless `ALLOW_SIGNUP=true`. Create
   the owner account right after the first start: until then, anyone who reaches the app can claim it.
-- Each account may store at most `UPLOAD_QUOTA_MB` (default 1024 MB) of images, the owner included.
+- Each account may store at most `UPLOAD_QUOTA_MB` (default 1024 MB) of attachments (images, PDF and
+  GPX files together), the owner included.
   Note content has no size quota (only the write rate limits above and a 5 MB limit per save), so every
   account can grow the data volume, which also holds the database. Only allow accounts you trust:
   `ALLOW_SIGNUP=true` on a public deployment lets strangers create accounts that can fill the disk.
+- Uploads are accepted by content only: PNG/JPEG/WebP/GIF images (10 MB), PDF (`%PDF-`, 25 MB) and GPX
+  (UTF-8 XML whose root element is `gpx`, no `<!DOCTYPE>`/`<!ENTITY>`, 25 MB); anything else gets 415.
+  Images are served inline. **Non-image files are always served as downloads**, on the owner route and
+  the shared route alike: `Content-Disposition: attachment` with the original name,
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox` on the file response, so
+  opening a file's URL directly never renders it on the app's origin. The page CSP allows `blob:` in
+  `connect-src` (the shared PDF viewer reads its fetched bytes back from a blob URL) and never
+  `unsafe-eval`.
 
 Commands inside the container (from the same directory, with the same `-f` files):
 

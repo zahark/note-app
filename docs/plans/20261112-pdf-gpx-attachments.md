@@ -156,9 +156,10 @@
   - built under a separate compose project (`-p notesverify`, own image tag, port 127.0.0.1:3300, own volume/network); curl: PDF and GPX uploads 201, `GET /api/attachments/:aid` → `Content-Disposition: attachment; filename=…; filename*=UTF-8''…`, `nosniff`, `Content-Security-Policy: sandbox`, bytes identical; HTML named .pdf → 415; the built SPA serves the lazy `pdf-*.js` chunk and the `pdf.worker.min-*.mjs` worker same-origin; the full Playwright smoke spec passed against the container (PDF viewer pages, GPX download, shared PIN view, no CSP violations); everything torn down afterwards
 
 ### Task 9: [Final] Update documentation
-- [ ] update README.md (Features: PDF viewer and GPX downloads; limits per kind; security note that non-image files are always served as downloads)
-- [ ] update CLAUDE.md (AttachmentFile node, per-kind detection and limits, download header helper, PDF.js lazy loading)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update README.md (Features: PDF viewer and GPX downloads; limits per kind; security note that non-image files are always served as downloads)
+  - also: nginx `client_max_body_size 27m`, quota/upload rate-limit wording covers all kinds (README, `.env.example`, `config.ts` comment), GPX must be UTF-8, lazy PDF.js chunk; the start/stop, backup/restore and moving sections are unchanged
+- [x] update CLAUDE.md (AttachmentFile node, per-kind detection and limits, download header helper, PDF.js lazy loading)
+- [x] move this plan to `docs/plans/completed/` (skipped - the plan is moved by the exec harness after all phases finish)
 
 ## Post-Completion
 *Informational only*

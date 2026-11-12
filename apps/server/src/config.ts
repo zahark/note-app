@@ -134,7 +134,7 @@ const port = optional(
     .default(3000),
 )
 
-/** UPLOAD_QUOTA_MB when unset: 1 GiB of images per account. */
+/** UPLOAD_QUOTA_MB when unset: 1 GiB of attachments (images, PDF, GPX) per account. */
 export const DEFAULT_UPLOAD_QUOTA_MB = 1024
 
 const uploadQuotaMb = optional(
