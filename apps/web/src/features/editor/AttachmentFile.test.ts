@@ -3,7 +3,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fileDisplayName, formatFileSize, type AttachmentDownloader } from './AttachmentFile'
 import { attachmentSrc } from './AttachmentImage'
 import { editorExtensions } from './extensions'
+import { mountPdfViewer } from './pdfViewerMount'
 import { copyNodeAt, firstNodePos, pasteAtEnd } from '@/test/clipboard'
+
+// the React PDF viewer has its own tests (PdfViewer.test.tsx); here only its mounting is checked
+vi.mock('./pdfViewerMount', () => ({
+  mountPdfViewer: vi.fn(() => ({ update: vi.fn(), destroy: vi.fn() })),
+}))
+const mountMock = vi.mocked(mountPdfViewer)
 
 const AID = '0b4c2f7e-1d2a-4c3b-9e8f-0123456789ab'
 const OTHER_AID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
@@ -30,6 +37,7 @@ function makeEditor(
 afterEach(() => {
   while (editors.length) editors.pop()!.destroy()
   document.body.innerHTML = ''
+  mountMock.mockClear()
 })
 
 const doc = (...content: JSONContent[]): JSONContent => ({ type: 'doc', content })
@@ -276,5 +284,48 @@ describe('AttachmentFile node view', () => {
     expect(chip.querySelector('[data-role="pdf-viewer"]')).not.toBeNull()
     chip.querySelector('button')!.click()
     expect(download).toHaveBeenCalledWith(OTHER_AID, 'new.pdf')
+  })
+})
+
+describe('AttachmentFile PDF viewer mounting', () => {
+  const lastMount = () => mountMock.mock.results.at(-1)!.value as { update: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }
+
+  it('mounts the viewer into the PDF slot with the aid and the resolver', () => {
+    const editor = makeEditor(doc(file(attachmentSrc(AID), { name: 'guide.pdf', kind: 'pdf' })))
+    const slot = editor.view.dom.querySelector<HTMLElement>('[data-role="pdf-viewer"]')!
+    expect(mountMock).toHaveBeenCalledTimes(1)
+    expect(mountMock).toHaveBeenCalledWith(slot, AID, ownerResolver)
+  })
+
+  it('never mounts a viewer for a GPX or for a PDF without a valid reference', () => {
+    makeEditor(doc(file(attachmentSrc(AID)), file('https://example.com/x.pdf', { kind: 'pdf' })))
+    expect(mountMock).not.toHaveBeenCalled()
+  })
+
+  it('updates the viewer when the reference changes and unmounts it when the node stops being a PDF', () => {
+    const editor = makeEditor(doc(file(attachmentSrc(AID), { kind: 'pdf' })))
+    const mounted = lastMount()
+    const pos = firstNodePos(editor, 'attachmentFile')
+
+    editor.view.dispatch(editor.state.tr.setNodeMarkup(pos, undefined, { src: attachmentSrc(OTHER_AID), kind: 'pdf' }))
+    expect(mounted.update).toHaveBeenCalledWith(OTHER_AID)
+    expect(mountMock).toHaveBeenCalledTimes(1)
+
+    editor.view.dispatch(editor.state.tr.setNodeMarkup(pos, undefined, { src: attachmentSrc(OTHER_AID), kind: 'gpx' }))
+    expect(mounted.destroy).toHaveBeenCalledTimes(1)
+    expect(editor.view.dom.querySelector('[data-role="pdf-viewer"]')).toBeNull()
+  })
+
+  it('unmounts the viewer when the node is deleted or the editor is destroyed', () => {
+    const editor = makeEditor(doc(file(attachmentSrc(AID), { kind: 'pdf' }), paragraph('after')))
+    const first = lastMount()
+    const pos = firstNodePos(editor, 'attachmentFile')
+    editor.view.dispatch(editor.state.tr.delete(pos, pos + 1))
+    expect(first.destroy).toHaveBeenCalledTimes(1)
+
+    const other = makeEditor(doc(file(attachmentSrc(AID), { kind: 'pdf' })))
+    const second = lastMount()
+    other.destroy()
+    expect(second.destroy).toHaveBeenCalledTimes(1)
   })
 })

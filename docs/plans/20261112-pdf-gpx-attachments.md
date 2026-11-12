@@ -96,13 +96,17 @@
 
 **Files:**
 - Create: `apps/web/src/features/editor/PdfViewer.tsx`, `apps/web/src/features/editor/pdf.ts` (lazy PDF.js loader), `apps/web/src/features/editor/PdfViewer.test.tsx`
+- ➕ Create: `apps/web/src/features/editor/pdfViewerMount.ts` (`mountPdfViewer`: own React root per mount, used by the plain-DOM node view), `apps/web/src/features/editor/pdf.test.ts` (the `pdf.ts` wiring against a fake `pdfjs-dist`)
 - Modify: `apps/web/package.json` (add `pdfjs-dist`), `apps/web/src/features/editor/AttachmentFile.ts`
 
-- [ ] write tests (PDF.js mocked at the `pdf.ts` boundary): loading state, renders page 1, previous/next and "page i of n" (buttons disabled at the ends), error state shows "Preview unavailable" with the download button still working, the viewer is not created for GPX
-- [ ] implement `pdf.ts`: dynamic import of `pdfjs-dist`, same-origin bundled worker, `isEvalSupported: false`, bytes passed as `ArrayBuffer`, document destroyed on unmount
-- [ ] implement `PdfViewer` (fit-to-width canvas, max height about 480 px, keyboard-accessible buttons) and mount it from the PDF node view
-- [ ] verify `npm run build -w apps/web` keeps PDF.js out of the main chunk (separate lazy chunk) and record chunk sizes in the plan
-- [ ] run tests — must pass before task 5
+- [x] write tests (PDF.js mocked at the `pdf.ts` boundary): loading state, renders page 1, previous/next and "page i of n" (buttons disabled at the ends), error state shows "Preview unavailable" with the download button still working, the viewer is not created for GPX
+- [x] implement `pdf.ts`: dynamic import of `pdfjs-dist`, same-origin bundled worker, `isEvalSupported: false`, bytes passed as `ArrayBuffer`, document destroyed on unmount
+  - note: `pdfjs-dist` 6.4.299 no longer has the `isEvalSupported` option (no eval code path left), so it is not passed; `enableXfa: false` and canvas-only rendering (no annotation layer) are set instead
+- [x] implement `PdfViewer` (fit-to-width canvas, max height about 480 px, keyboard-accessible buttons) and mount it from the PDF node view
+- [x] verify `npm run build -w apps/web` keeps PDF.js out of the main chunk (separate lazy chunk) and record chunk sizes in the plan
+  - main `index-*.js`: 1,034.50 kB (327.67 kB gzip) before → 1,039.75 kB (329.57 kB gzip) after (+5 kB: viewer + loader only)
+  - lazy `pdf-*.js` (PDF.js): 430.16 kB (129.27 kB gzip); worker asset `pdf.worker.min-*.mjs`: 1,264.34 kB, same origin, loaded only when a PDF is shown
+- [x] run tests — must pass before task 5
 
 ### Task 5: Upload entry points and routing
 

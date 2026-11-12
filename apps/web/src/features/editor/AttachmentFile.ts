@@ -1,5 +1,6 @@
 import { mergeAttributes, Node } from '@tiptap/core'
 import { attachmentSrc, elementAttachmentId, parseAttachmentSrc, type AttachmentResolver } from './AttachmentImage'
+import { mountPdfViewer, type PdfViewerMount } from './pdfViewerMount'
 
 /** The non-image attachment kinds a file node can show. */
 export const FILE_KINDS = ['pdf', 'gpx'] as const
@@ -61,8 +62,9 @@ const FILE_BLOCK_SELECTOR = `div[data-type="${FILE_BLOCK_TYPE}"]`
  *   and a pasted file block without an `attachment://` reference is dropped with its content.
  * - `name`, `size` and `kind` are display-only, untrusted text: the node view sets them with
  *   `textContent`, never as HTML. The download's file name comes from the server.
- * - The node view is a chip (kind badge, name, size, Download button); a `pdf` node also gets an
- *   empty viewer slot (`data-role="pdf-viewer"`) for the PDF preview.
+ * - The node view is a chip (kind badge, name, size, Download button); a `pdf` node also gets a
+ *   viewer slot (`data-role="pdf-viewer"`) with the `PdfViewer` mounted in it (its bytes come from
+ *   `resolveAttachment`), unmounted when the node stops being a PDF or the node view is destroyed.
  */
 export const AttachmentFile = Node.create<AttachmentFileOptions>({
   name: 'attachmentFile',
@@ -137,6 +139,7 @@ export const AttachmentFile = Node.create<AttachmentFileOptions>({
 
   addNodeView() {
     const download = this.options.downloadAttachment
+    const resolve = this.options.resolveAttachment
     const extraAttributes = this.options.HTMLAttributes
 
     return ({ node: initialNode }) => {
@@ -167,6 +170,11 @@ export const AttachmentFile = Node.create<AttachmentFileOptions>({
       dom.append(chip)
 
       let viewerSlot: HTMLElement | null = null
+      let viewer: PdfViewerMount | null = null
+      const unmountViewer = () => {
+        viewer?.destroy()
+        viewer = null
+      }
 
       const render = () => {
         const aid = parseAttachmentSrc(node.attrs.src)
@@ -193,8 +201,17 @@ export const AttachmentFile = Node.create<AttachmentFileOptions>({
           viewerSlot.setAttribute('data-role', 'pdf-viewer')
           dom.append(viewerSlot)
         } else if (kind !== 'pdf' && viewerSlot) {
+          unmountViewer()
           viewerSlot.remove()
           viewerSlot = null
+        }
+
+        // the viewer shows a PDF with a valid reference; it is never mounted for any other kind
+        if (viewerSlot && aid) {
+          if (viewer) viewer.update(aid)
+          else viewer = mountPdfViewer(viewerSlot, aid, resolve)
+        } else {
+          unmountViewer()
         }
       }
 
@@ -220,6 +237,7 @@ export const AttachmentFile = Node.create<AttachmentFileOptions>({
           return target instanceof Element && (button.contains(target) || !!viewerSlot?.contains(target))
         },
         ignoreMutation: () => true,
+        destroy: unmountViewer,
       }
     }
   },
