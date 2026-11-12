@@ -5,6 +5,7 @@ import { AppError, badRequest, notFound, unsupportedMediaType } from '../errors.
 import { getAttachment } from '../repos/attachments.js'
 import {
   assertWithinQuota,
+  attachmentResponseHeaders,
   MAX_FILE_BYTES,
   MAX_IMAGE_BYTES,
   MAX_UPLOAD_BYTES,
@@ -33,7 +34,8 @@ export interface AttachmentRoutesOptions {
 
 /**
  * `POST /api/attachments` (multipart upload of one image, PDF or GPX file; returns `{id}`) and
- * `GET /api/attachments/:aid` (the caller's own attachment bytes). Every route requires a session;
+ * `GET /api/attachments/:aid` (the caller's own attachment bytes; images inline, other kinds as a
+ * sandboxed download, see `attachmentResponseHeaders`). Every route requires a session;
  * another user's attachment is indistinguishable from a missing one (404). Uploads are limited to
  * `UPLOAD_LIMIT` per account (429) and to `UPLOAD_QUOTA_MB` of stored attachments per account (413).
  */
@@ -82,8 +84,7 @@ export async function attachmentRoutes(
     const bytes = await readAttachmentFile(app.config.dataDir, attachment.storage_name)
     if (!bytes) throw notFound('Attachment not found')
     return reply
-      .type(attachment.mime)
-      .header('x-content-type-options', 'nosniff')
+      .headers(attachmentResponseHeaders(attachment))
       .header('cache-control', 'private, max-age=31536000, immutable')
       .send(bytes)
   })

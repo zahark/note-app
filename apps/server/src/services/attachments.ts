@@ -63,6 +63,44 @@ const KINDS: Record<AttachmentKind, { maxBytes: number; label: string; fallbackN
 /** The GPX sniff looks at this many leading bytes (the DOCTYPE/ENTITY check covers all of them). */
 export const GPX_SNIFF_BYTES = 64 * KIB
 
+const IMAGE_MIMES: ReadonlySet<string> = new Set<ImageMime>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+/** RFC 8187 `attr-char`: the bytes a `filename*` value may carry unencoded. */
+const ATTR_CHAR = /^[A-Za-z0-9!#$&+\-.^_`|~]$/
+
+/**
+ * A `Content-Disposition: attachment` value naming the download `name`: `filename*` carries the exact
+ * name (UTF-8, percent-encoded; a lone surrogate becomes U+FFFD), `filename` an ASCII fallback with
+ * everything but printable ASCII, and `"`, `\`, `%`, `;`, replaced by `_`. Neither part can break out
+ * of its parameter or inject a header.
+ */
+export function contentDisposition(name: string): string {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\%;]/g, '_')
+  const encoded = [...Buffer.from(name, 'utf8')]
+    .map((b) => {
+      const c = String.fromCharCode(b)
+      return ATTR_CHAR.test(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, '0')}`
+    })
+    .join('')
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`
+}
+
+/**
+ * Response headers for serving an attachment's bytes (owner and shared routes alike). Images are served
+ * inline with their type and `nosniff`; every other kind (PDF, GPX, anything not a known image type)
+ * is always a download named after `original_name`, sandboxed by its own CSP, so opening the file URL
+ * directly can never render it on the app's origin.
+ */
+export function attachmentResponseHeaders(attachment: { mime: string; original_name: string }): Record<string, string> {
+  const headers = { 'content-type': attachment.mime, 'x-content-type-options': 'nosniff' }
+  if (IMAGE_MIMES.has(attachment.mime)) return headers
+  return {
+    ...headers,
+    'content-disposition': contentDisposition(attachment.original_name),
+    'content-security-policy': 'sandbox',
+  }
+}
+
 /** Directory holding the uploaded files. */
 export const uploadsDir = (dataDir: string): string => path.join(dataDir, 'uploads')
 

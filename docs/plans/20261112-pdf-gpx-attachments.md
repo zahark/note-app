@@ -76,10 +76,10 @@
 - Modify: `apps/server/src/routes/attachments.ts`, `apps/server/src/routes/shared.ts`
 - Modify: `apps/server/test/attachments.test.ts`, `apps/server/test/shared.test.ts`, `apps/server/test/isolation.test.ts` (if new rows are needed)
 
-- [ ] write tests: owner and shared GET of a PDF/GPX return `Content-Disposition: attachment` with the stored name (incl. a non-ASCII name and a name containing quotes/semicolons, safely encoded), `nosniff`, and `Content-Security-Policy: sandbox`; images keep today's headers (no disposition)
-- [ ] write tests: user B gets 404 for A's PDF/GPX; a shared note's credential cannot fetch a PDF linked only to another note (identical UNAVAILABLE)
-- [ ] implement one shared header helper used by both routes
-- [ ] run tests — must pass before task 3
+- [x] write tests: owner and shared GET of a PDF/GPX return `Content-Disposition: attachment` with the stored name (incl. a non-ASCII name and a name containing quotes/semicolons, safely encoded), `nosniff`, and `Content-Security-Policy: sandbox`; images keep today's headers (no disposition)
+- [x] write tests: user B gets 404 for A's PDF/GPX; a shared note's credential cannot fetch a PDF linked only to another note (identical UNAVAILABLE)
+- [x] implement one shared header helper used by both routes (`attachmentResponseHeaders` + `contentDisposition` in `services/attachments.ts`)
+- [x] run tests — must pass before task 3
 
 ### Task 3: AttachmentFile editor node (chip + download)
 

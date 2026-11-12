@@ -48,6 +48,16 @@ export const PNG = Buffer.from(
   'base64',
 )
 
+/** A minimal PDF (detected by its leading `%PDF-`). */
+export const PDF = Buffer.from('%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\n%%EOF\n', 'latin1')
+
+/** The root element of a minimal GPX track. */
+export const GPX_BODY =
+  '<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Ridge</name></trk></gpx>'
+
+/** A minimal GPX file with an XML declaration. */
+export const GPX = Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>\n${GPX_BODY}\n`)
+
 /** A temporary DATA_DIR for tests that write uploads; remove it with `fs.rmSync(dir, {recursive:true})`. */
 export function tmpDataDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), 'notes-app-test-'))
@@ -91,11 +101,27 @@ export async function uploadPng(app: FastifyInstance, user: TestUser): Promise<s
   return (res.json() as { id: string }).id
 }
 
+/** Uploads `file` as `user` and returns the new attachment id. */
+export async function uploadFile(app: FastifyInstance, user: TestUser, file: UploadFile): Promise<string> {
+  const res = await upload(app, user, file)
+  if (res.statusCode !== 201) throw new Error(`upload failed: ${res.statusCode} ${res.body}`)
+  return (res.json() as { id: string }).id
+}
+
 /** A TipTap document with a paragraph and one image node per attachment id. */
 export const docWithImages = (...aids: string[]) => ({
   type: 'doc',
   content: [
     { type: 'paragraph', content: [{ type: 'text', text: 'pics' }] },
     ...aids.map((aid) => ({ type: 'image', attrs: { src: `attachment://${aid}` } })),
+  ],
+})
+
+/** A TipTap document with a paragraph and one file node (PDF/GPX) per attachment id. */
+export const docWithFiles = (...aids: string[]) => ({
+  type: 'doc',
+  content: [
+    { type: 'paragraph', content: [{ type: 'text', text: 'files' }] },
+    ...aids.map((aid) => ({ type: 'attachmentFile', attrs: { src: `attachment://${aid}`, name: 'file', size: 1, kind: 'pdf' } })),
   ],
 })

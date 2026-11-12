@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  contentDisposition,
   detectAttachmentKind,
   detectImageMime,
   extractAttachmentIds,
@@ -14,7 +15,19 @@ import {
   uploadsDir,
 } from '../src/services/attachments.js'
 import { closeApp, errorCode, makeApp, ORIGIN, type TestApp } from './helpers/auth.js'
-import { api, loginAs, PNG, tmpDataDir, upload, uploadPng, type TestUser } from './helpers/api.js'
+import {
+  api,
+  GPX,
+  GPX_BODY,
+  loginAs,
+  PDF,
+  PNG,
+  tmpDataDir,
+  upload,
+  uploadFile,
+  uploadPng,
+  type TestUser,
+} from './helpers/api.js'
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
@@ -22,9 +35,6 @@ const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 
 const GIF = Buffer.from('GIF89a\x01\x00\x01\x00\x00\x00\x00;', 'latin1')
 const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.from([0x1a, 0, 0, 0]), Buffer.from('WEBPVP8 ')])
 const SVG = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')
-const PDF = Buffer.from('%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\n%%EOF\n', 'latin1')
-const GPX_BODY = '<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Ridge</name></trk></gpx>'
-const GPX = Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>\n${GPX_BODY}\n`)
 const BOM = Buffer.from([0xef, 0xbb, 0xbf])
 const KML = Buffer.from('<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"></kml>')
 const HTML = Buffer.from('<!doctype html><html><body><script>alert(1)</script></body></html>')
@@ -491,6 +501,30 @@ describe('POST /api/attachments: per-account storage quota', () => {
   })
 })
 
+describe('contentDisposition', () => {
+  it.each([
+    ['a plain ASCII name', 'route.pdf', `attachment; filename="route.pdf"; filename*=UTF-8''route.pdf`],
+    ['spaces', 'my track.gpx', `attachment; filename="my track.gpx"; filename*=UTF-8''my%20track.gpx`],
+    [
+      'a non-ASCII name',
+      'Перевал Ö.gpx',
+      `attachment; filename="_______ _.gpx"; filename*=UTF-8''%D0%9F%D0%B5%D1%80%D0%B5%D0%B2%D0%B0%D0%BB%20%C3%96.gpx`,
+    ],
+    [
+      'quotes, semicolons, backslashes and percent signs',
+      `a"b;c\\d%e'(f)*.pdf`,
+      `attachment; filename="a_b_c_d_e'(f)*.pdf"; filename*=UTF-8''a%22b%3Bc%5Cd%25e%27%28f%29%2A.pdf`,
+    ],
+    ['control characters (no header injection)', 'a\r\nX-Evil: 1.pdf', `attachment; filename="a__X-Evil: 1.pdf"; filename*=UTF-8''a%0D%0AX-Evil%3A%201.pdf`],
+  ])('encodes %s', (_name, input, expected) => {
+    expect(contentDisposition(input)).toBe(expected)
+  })
+
+  it('never leaves a lone surrogate unencoded', () => {
+    expect(contentDisposition('a\ud800.pdf')).toBe(`attachment; filename="a_.pdf"; filename*=UTF-8''a%EF%BF%BD.pdf`)
+  })
+})
+
 describe('GET /api/attachments/:aid', () => {
   it('serves the owner the bytes with the stored mime and nosniff', async () => {
     const aid = await uploadPng(t.app, alice)
@@ -521,5 +555,49 @@ describe('GET /api/attachments/:aid', () => {
     const aid = await uploadPng(t.app, alice)
     rmSync(uploadsDir(dataDir), { recursive: true })
     expect((await api(t.app, alice, 'GET', `/api/attachments/${aid}`)).statusCode).toBe(404)
+  })
+
+  it('serves an image inline: no Content-Disposition and no sandbox CSP', async () => {
+    const aid = await uploadPng(t.app, alice)
+    const res = await api(t.app, alice, 'GET', `/api/attachments/${aid}`)
+    expect(res.headers['content-disposition']).toBeUndefined()
+    expect(res.headers['content-security-policy']).toBeUndefined()
+  })
+
+  it.each([
+    ['a PDF', PDF, 'route.pdf', 'application/pdf'],
+    ['a GPX', GPX, 'ridge.gpx', 'application/gpx+xml'],
+  ])('serves %s as a sandboxed download named after the stored file name', async (_name, data, filename, mime) => {
+    const aid = await uploadFile(t.app, alice, { data, filename, contentType: 'application/octet-stream' })
+    const res = await api(t.app, alice, 'GET', `/api/attachments/${aid}`)
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toBe(mime)
+    expect(res.headers['content-disposition']).toBe(`attachment; filename="${filename}"; filename*=UTF-8''${filename}`)
+    expect(res.headers['x-content-type-options']).toBe('nosniff')
+    expect(res.headers['content-security-policy']).toBe('sandbox')
+    expect(res.headers['cache-control']).toBe('private, max-age=31536000, immutable')
+    expect(res.rawPayload).toEqual(data)
+  })
+
+  it.each([
+    ['a non-ASCII name', 'Перевал.gpx', `attachment; filename="_______.gpx"; filename*=UTF-8''%D0%9F%D0%B5%D1%80%D0%B5%D0%B2%D0%B0%D0%BB.gpx`],
+    ['quotes and semicolons', 'a"; filename="evil.html', `attachment; filename="a__ filename=_evil.html"; filename*=UTF-8''a%22%3B%20filename%3D%22evil.html`],
+  ])('encodes a stored name with %s safely', async (_name, stored, expected) => {
+    const aid = await uploadFile(t.app, alice, { data: GPX, filename: 'x.gpx' })
+    t.db.prepare('UPDATE attachments SET original_name = ? WHERE id = ?').run(stored, aid)
+    const res = await api(t.app, alice, 'GET', `/api/attachments/${aid}`)
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-disposition']).toBe(expected)
+  })
+
+  it("user B fetching user A's PDF or GPX → 404, same as a missing id", async () => {
+    const missing = await api(t.app, bob, 'GET', '/api/attachments/00000000-0000-4000-8000-000000000000')
+    for (const data of [PDF, GPX]) {
+      const aid = await uploadFile(t.app, alice, { data })
+      const foreign = await api(t.app, bob, 'GET', `/api/attachments/${aid}`)
+      expect(foreign.statusCode).toBe(404)
+      expect(foreign.body).toBe(missing.body)
+      expect(foreign.headers['content-disposition']).toBeUndefined()
+    }
   })
 })

@@ -6,7 +6,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { getSharedAttachment, getSharedNote } from '../repos/publicShare.js'
-import { readAttachmentFile } from '../services/attachments.js'
+import { attachmentResponseHeaders, readAttachmentFile } from '../services/attachments.js'
 import { unavailable } from '../services/share.js'
 import { entityId, idParams } from './schemas.js'
 
@@ -63,7 +63,8 @@ function authorize(app: FastifyInstance, request: FastifyRequest, noteId: string
 /**
  * `POST /api/shared/:id/unlock {pin}` → `{token, expires_at}`;
  * `GET /api/shared/:id` → `{note:{title, content, attachment_ids}}`;
- * `GET /api/shared/:id/attachments/:aid` → image bytes, only when `note_attachments` links `:aid` to `:id`.
+ * `GET /api/shared/:id/attachments/:aid` → attachment bytes (images inline, other kinds as a sandboxed
+ * download, see `attachmentResponseHeaders`), only when `note_attachments` links `:aid` to `:id`.
  */
 export async function sharedRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/shared/:id/unlock', async (request) => {
@@ -88,6 +89,6 @@ export async function sharedRoutes(app: FastifyInstance): Promise<void> {
     if (!attachment) throw unavailable()
     const bytes = await readAttachmentFile(app.config.dataDir, attachment.storage_name)
     if (!bytes) throw unavailable()
-    return reply.type(attachment.mime).header('x-content-type-options', 'nosniff').send(bytes)
+    return reply.headers(attachmentResponseHeaders(attachment)).send(bytes)
   })
 }

@@ -57,6 +57,8 @@ export function getSharedNote(db: Db, noteId: string): SharedNote | undefined {
 export interface SharedAttachment {
   storage_name: string
   mime: string
+  /** Display name; becomes the download file name for non-image kinds. */
+  original_name: string
 }
 
 /**
@@ -69,7 +71,7 @@ export interface SharedAttachment {
 export function getSharedAttachment(db: Db, noteId: string, attachmentId: string): SharedAttachment | undefined {
   return db
     .prepare(
-      `SELECT a.storage_name, a.mime
+      `SELECT a.storage_name, a.mime, a.original_name
          FROM note_attachments na
          JOIN notes n ON n.id = na.note_id
          JOIN attachments a ON a.id = na.attachment_id AND a.user_id = n.user_id

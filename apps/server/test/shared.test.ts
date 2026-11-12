@@ -9,7 +9,20 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { uploadsDir } from '../src/services/attachments.js'
 import { SHARE_TOKEN_TTL_SEC } from '../src/services/share.js'
 import { closeApp, errorCode, makeApp, ORIGIN, type TestApp } from './helpers/auth.js'
-import { api, doc, docWithImages, loginAs, PNG, tmpDataDir, uploadPng, type TestUser } from './helpers/api.js'
+import {
+  api,
+  doc,
+  docWithFiles,
+  docWithImages,
+  GPX,
+  loginAs,
+  PDF,
+  PNG,
+  tmpDataDir,
+  uploadFile,
+  uploadPng,
+  type TestUser,
+} from './helpers/api.js'
 
 let dataDir: string
 let t: TestApp
@@ -437,6 +450,64 @@ describe('shared attachments', () => {
     expectUnavailable(await getSharedImage(noteId, aid, { query: { token } }))
     expectUnavailable(await getShared(noteId, { query: { token } }))
     expect((await getSharedImage(noteId, aid, { token })).statusCode).toBe(200)
+  })
+
+  it('serves a linked image inline: no Content-Disposition and no sandbox CSP', async () => {
+    const res = await getSharedImage(noteId, aid, { token: await unlock() })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-disposition']).toBeUndefined()
+    expect(res.headers['content-security-policy']).toBeUndefined()
+  })
+
+  it.each([
+    ['a PDF', PDF, 'route.pdf', 'application/pdf'],
+    ['a GPX', GPX, 'ridge.gpx', 'application/gpx+xml'],
+  ])('serves %s as a sandboxed download with a PIN token or a signed link', async (_name, data, filename, mime) => {
+    const fid = await uploadFile(t.app, alice, { data, filename })
+    await saveContent(noteId, docWithFiles(fid))
+    const token = await unlock()
+    const viaToken = await getSharedImage(noteId, fid, { token })
+    await stopSharing()
+    const viaLink = await getSharedImage(noteId, fid, { query: linkQuery(await shareSigned()) })
+    for (const res of [viaToken, viaLink]) {
+      expect(res.statusCode).toBe(200)
+      expect(res.headers['content-type']).toBe(mime)
+      expect(res.headers['content-disposition']).toBe(`attachment; filename="${filename}"; filename*=UTF-8''${filename}`)
+      expect(res.headers['x-content-type-options']).toBe('nosniff')
+      expect(res.headers['content-security-policy']).toBe('sandbox')
+      expect(res.headers['cache-control']).toBe('no-store')
+      expect(res.rawPayload.equals(data)).toBe(true)
+    }
+  })
+
+  it('encodes a stored name with non-ASCII characters, quotes and semicolons safely', async () => {
+    const fid = await uploadFile(t.app, alice, { data: PDF, filename: 'x.pdf' })
+    t.db.prepare('UPDATE attachments SET original_name = ? WHERE id = ?').run('Ö"; x.pdf', fid)
+    await saveContent(noteId, docWithFiles(fid))
+    const res = await getSharedImage(noteId, fid, { token: await unlock() })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-disposition']).toBe(`attachment; filename="___ x.pdf"; filename*=UTF-8''%C3%96%22%3B%20x.pdf`)
+  })
+
+  it('a credential for note A cannot fetch a PDF or GPX linked only to note B (identical unavailable)', async () => {
+    const pdf = await uploadFile(t.app, alice, { data: PDF })
+    const gpx = await uploadFile(t.app, alice, { data: GPX })
+    await newNote('B', docWithFiles(pdf, gpx))
+    const token = await unlock()
+    const missing = await getSharedImage(noteId, randomUUID(), { token })
+    expectUnavailable(missing)
+    for (const fid of [pdf, gpx]) {
+      const res = await getSharedImage(noteId, fid, { token })
+      expectUnavailable(res)
+      expect(res.body).toBe(missing.body)
+      expect(res.headers['content-disposition']).toBeUndefined()
+    }
+  })
+
+  it("a shared note's credential cannot fetch another user's PDF hand-linked to it", async () => {
+    const bobsPdf = await uploadFile(t.app, bob, { data: PDF })
+    t.db.prepare('INSERT INTO note_attachments (note_id, attachment_id) VALUES (?, ?)').run(noteId, bobsPdf)
+    expectUnavailable(await getSharedImage(noteId, bobsPdf, { token: await unlock() }))
   })
 
   it('a missing file on disk is unavailable, not an error', async () => {
