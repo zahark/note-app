@@ -26,6 +26,16 @@ if (typeof window.matchMedia !== 'function') {
     }) as MediaQueryList
 }
 
+// jsdom has no layout; ProseMirror (TipTap) measures ranges when it scrolls the selection into view
+if (typeof Range.prototype.getClientRects !== 'function') {
+  const emptyRects = () => Object.assign([], { item: () => null }) as unknown as DOMRectList
+  Range.prototype.getClientRects = emptyRects
+  Range.prototype.getBoundingClientRect = () => new DOMRect()
+}
+if (typeof document.elementFromPoint !== 'function') {
+  document.elementFromPoint = () => null
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()

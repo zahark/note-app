@@ -1,16 +1,25 @@
 import { useState, type ReactNode } from 'react'
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router'
+import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router'
 import { Layout } from '@/components/Layout'
 import { Toaster } from '@/components/ui/sonner'
 import { LoginPage } from '@/features/auth/LoginPage'
 import { RequireAuth } from '@/features/auth/RequireAuth'
 import { SettingsDialog } from '@/features/auth/SettingsDialog'
+import { NotePane } from '@/features/editor/Editor'
 import { SharedNotePage } from '@/features/share/SharedNotePage'
-import { Sidebar } from '@/features/tree/Sidebar'
+import { NOTE_PARAM, Sidebar } from '@/features/tree/Sidebar'
 import { createQueryClient } from '@/lib/queryClient'
 
 function HomePage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const noteId = searchParams.get(NOTE_PARAM)
+  const closeNote = () =>
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete(NOTE_PARAM)
+      return next
+    })
   return (
     <Layout
       sidebar={
@@ -22,9 +31,13 @@ function HomePage() {
         </>
       }
     >
-      <div className="flex h-full items-center justify-center p-4 text-sm text-muted-foreground">
-        Select a note or create a new one.
-      </div>
+      {noteId ? (
+        <NotePane key={noteId} noteId={noteId} onClose={closeNote} />
+      ) : (
+        <div className="flex h-full items-center justify-center p-4 text-sm text-muted-foreground">
+          Select a note or create a new one.
+        </div>
+      )}
     </Layout>
   )
 }
