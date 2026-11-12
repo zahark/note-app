@@ -88,7 +88,7 @@ describe('redirect to login on 401', () => {
   it('serves /shared/:id without a session and without redirecting', async () => {
     const { requests } = mockFetch({ 'GET /api/auth/me': unauthorizedResponse })
     renderApp('/shared/abc')
-    expect(await screen.findByText('Loading shared note…')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'This note is protected' })).toBeInTheDocument()
     expect(screen.getByTestId('location')).toHaveTextContent('/shared/abc')
     expect(requests.some((r) => r.path === '/api/auth/me')).toBe(false)
   })

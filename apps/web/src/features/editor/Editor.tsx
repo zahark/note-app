@@ -4,6 +4,7 @@ import { EditorContent, useEditor, type Editor } from '@tiptap/react'
 import { AlertTriangleIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { ShareButton } from '@/features/share/ShareDialog'
 import { errorMessage, useTree } from '@/features/tree/api'
 import { useRenameNote } from '@/features/tree/mutations'
 import { ApiError } from '@/lib/api'
@@ -168,6 +169,7 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
           <div className="flex items-start gap-3">
             <TitleField noteId={note.id} loadedTitle={note.title} onEnter={() => editor.commands.focus('start')} />
             <SaveIndicator status={status} uploading={uploading > 0} />
+            <ShareButton note={note} />
           </div>
           <EditorContent editor={editor} className="mt-2" />
         </div>

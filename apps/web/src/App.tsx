@@ -7,7 +7,7 @@ import { LoginPage } from '@/features/auth/LoginPage'
 import { RequireAuth } from '@/features/auth/RequireAuth'
 import { SettingsDialog } from '@/features/auth/SettingsDialog'
 import { NotePane } from '@/features/editor/Editor'
-import { SharedNotePage } from '@/features/share/SharedNotePage'
+import { SharedView } from '@/features/share/SharedView'
 import { NOTE_PARAM, Sidebar } from '@/features/tree/Sidebar'
 import { createQueryClient } from '@/lib/queryClient'
 
@@ -47,7 +47,7 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
-      <Route path="/shared/:id" element={<SharedNotePage />} />
+      <Route path="/shared/:id" element={<SharedView />} />
       <Route
         path="/"
         element={

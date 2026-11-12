@@ -34,6 +34,8 @@ export interface RequestOptions {
   body?: unknown
   headers?: Record<string, string>
   signal?: AbortSignal
+  /** Defaults to `same-origin`; the public shared view uses `omit` (it never needs the session cookie). */
+  credentials?: 'same-origin' | 'omit'
 }
 
 function isErrorBody(value: unknown): value is ApiErrorBody {
@@ -81,7 +83,7 @@ export async function apiFetch<T = unknown>(path: string, opts: RequestOptions =
     res = await fetch(path, {
       method: opts.method ?? 'GET',
       // same-origin only: the session cookie is never sent anywhere else
-      credentials: 'same-origin',
+      credentials: opts.credentials ?? 'same-origin',
       headers,
       body,
       signal: opts.signal,
