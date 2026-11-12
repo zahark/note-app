@@ -156,7 +156,8 @@ describe('Sidebar new note / new folder', () => {
 
     expect(await screen.findByRole('treeitem', { name: 'Untitled' })).toHaveAttribute('aria-level', '2')
     expect(requests.find((r) => r.method === 'POST')?.body).toEqual({ folder_id: 'f-work' })
-    expect(treeItem('Untitled')).toHaveAttribute('aria-selected', 'true')
+    // the tree cache updates (item appears) before the mutate-level onSuccess opens the note
+    await waitFor(() => expect(treeItem('Untitled')).toHaveAttribute('aria-selected', 'true'))
     expect(screen.getByTestId('search')).toHaveTextContent('?note=n-new')
   })
 
@@ -170,7 +171,7 @@ describe('Sidebar new note / new folder', () => {
     expect(await screen.findByRole('treeitem', { name: 'New folder' })).toHaveAttribute('aria-level', '2')
     expect(treeItem('Work')).toHaveAttribute('aria-expanded', 'true')
     expect(requests.find((r) => r.method === 'POST')?.body).toEqual({ name: 'New folder', parent_folder_id: 'f-work' })
-    expect(treeItem('New folder')).toHaveAttribute('aria-selected', 'true')
+    await waitFor(() => expect(treeItem('New folder')).toHaveAttribute('aria-selected', 'true'))
   })
 
   it('creates in the selected note’s folder when a note is selected', async () => {

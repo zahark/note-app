@@ -75,6 +75,29 @@ describe('LoginGate', () => {
     expect(gate.tryEnter('a').ok).toBe(false)
     expect(gate.tryEnter('b').ok).toBe(true)
   })
+
+  it('periodically forgets accounts idle for over a day, keeping the failures of active ones', () => {
+    const clock = new FakeClock()
+    const gate = new LoginGate({ now: clock.now })
+    for (let i = 0; i < 8; i++) {
+      gate.tryEnter('idle')
+      gate.recordFailure('idle')
+      clock.advance(10_000)
+    }
+    clock.advance(25 * 60 * 60 * 1000)
+    for (let i = 0; i < 8; i++) {
+      gate.tryEnter('active')
+      gate.recordFailure('active')
+      clock.advance(10_000)
+    }
+    expect(gate.failures('idle')).toBe(8)
+    // the 1000th tryEnter triggers a sweep
+    for (let i = 0; i < 1000 - 16; i++) gate.tryEnter(`k-${i}`)
+    expect(gate.failures('idle')).toBe(0)
+    expect(gate.failures('active')).toBe(8)
+    expect(gate.tryEnter('active')).toEqual({ ok: true })
+    expect(gate.tryEnter('active').ok).toBe(false)
+  })
 })
 
 describe('login delay gate (HTTP)', () => {

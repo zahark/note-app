@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SESSION_TTL_SEC } from '../src/services/auth.js'
 import {
   closeApp,
@@ -47,6 +47,21 @@ describe('signup', () => {
     expect(res.statusCode).toBe(409)
     expect(errorCode(res)).toBe('EMAIL_TAKEN')
     expect(t.hasher.calls).toBe(calls)
+    expect(count('SELECT COUNT(*) FROM users')).toBe(1)
+  })
+
+  it('two concurrent signups for one email: one succeeds, the other gets 409 EMAIL_TAKEN', async () => {
+    // hold both inside argon2, so both have passed the pre-check; the unique index decides
+    t.hasher.blocked.add(PASSWORD)
+    const pending = Promise.all([
+      signup(t.app, { email: 'race@example.com', ip: '10.0.0.1' }),
+      signup(t.app, { email: 'RACE@example.com', ip: '10.0.0.2' }),
+    ])
+    await vi.waitFor(() => expect(t.hasher.active).toBe(2))
+    t.hasher.release()
+    const results = await pending
+    expect(results.map((r) => r.statusCode).sort()).toEqual([201, 409])
+    expect(errorCode(results.find((r) => r.statusCode === 409)!)).toBe('EMAIL_TAKEN')
     expect(count('SELECT COUNT(*) FROM users')).toBe(1)
   })
 
