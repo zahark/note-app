@@ -4,16 +4,61 @@ Self-hosted notes with nested folders, rich-text editing (TipTap) and secure sha
 (PIN-gated links or HMAC-signed expiring links). Runs as a single container: Fastify
 serves the API and the built SPA, and all state lives in one data directory.
 
-Status: under construction. See `docs/plans/20261112-notes-app.md` for the plan.
+## Features
+
+- Nested folders and notes in a sidebar tree: create, rename, delete (cascades), drag and drop or
+  "Move to…", with folder cycles rejected in the UI and on the server.
+- TipTap rich-text editor with debounced autosave (a stale save gets a conflict prompt instead of
+  overwriting) and image upload by button, drag or paste (PNG/JPEG/WebP/GIF, 10 MB max).
+- Sharing with no public access by default, per note:
+  - **PIN**: an 8-character PIN shown once; visitors unlock a read-only view (5 wrong PINs per note
+    in 15 minutes lock it out).
+  - **Expiring link**: an HMAC-signed link valid for 1 hour, 1 day, 7 days or 30 days.
+  - Regenerating or stopping a share revokes the old PIN or link immediately. Every failure (wrong PIN,
+    expired, revoked, missing) shows the same "unavailable" page.
+- Email + password accounts (argon2id, server-side sessions), change password in the app, reset from
+  the command line. The first account created is the **owner**.
+- One container, one data directory: SQLite database plus uploaded images, backed up with one command.
+
+## Quick start (Docker)
+
+```sh
+cp .env.example .env
+# set SESSION_SECRET and SHARE_HMAC_KEY (openssl rand -hex 32 each) and PUBLIC_ORIGIN
+docker compose -f docker-compose.yml -f compose.direct.yml up -d --build
+```
+
+Open `PUBLIC_ORIGIN` (e.g. `http://<host>:3000`) and sign up; that first account becomes the owner.
+`compose.direct.yml` is for a LAN or testing; see [Docker](#docker) for public deployments.
 
 ## Requirements
 
 - Node.js 22+ (`node -v`). On macOS: `brew install node@22`.
+- Or only Docker with Compose v2, to run the image.
 
 ## Layout
 
 - `apps/server` — Fastify + TypeScript API (Vitest tests in `apps/server/test`)
 - `apps/web` — React + Vite + Tailwind + shadcn/ui SPA (Vitest + Testing Library)
+- `e2e` — Playwright smoke test against the compiled server
+
+## Configuration
+
+All configuration comes from environment variables (`.env.example` documents each one). The server
+validates them at boot and refuses to start on any problem, listing every one.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SESSION_SECRET` | required | At least 32 characters (`openssl rand -hex 32`). Session and device cookies are stored as HMACs keyed by it, so changing it signs everyone out. |
+| `SHARE_HMAC_KEY` | required | At least 32 characters. Signs expiring links and PIN unlock tokens; changing it invalidates every expiring link. |
+| `PUBLIC_ORIGIN` | required | Exact origin the app is served from (`scheme://host[:port]`, no path). Every mutating request must send it as `Origin` (CSRF check); `https` adds the `Secure` cookie flag. Dev: `http://localhost:5173`. |
+| `TRUST_PROXY` | unset (trust nothing) | Hop count (`1`) or comma-separated proxy IPs/CIDRs; a bare `true` is rejected. Set it only when the app port is reachable solely through that proxy. |
+| `ALLOW_SIGNUP` | `true` | Allow new accounts. Set `false` once the owner exists on a public deployment. |
+| `DATA_DIR` | `./data` | Holds `notes.db` and `uploads/`. A relative path resolves against the server's working directory (`apps/server` when run through npm). Docker always uses `/data`. |
+| `HOST` | `0.0.0.0` | Listen address. |
+| `PORT` | `3000` | Listen port. |
+| `LOG_LEVEL` | `info` | `fatal` … `trace`; `debug` logs each request's client address and rate-limit IP key. |
+| `CLOUDFLARE_TUNNEL_TOKEN` | unset | `compose.tunnel.yml` only. |
 
 ## Development
 
