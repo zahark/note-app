@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import { cn } from 'cn'
 import { Button } from '@/components/ui/button'
+import { applyLinkHref } from './links'
 
 interface ToolbarProps {
   editor: Editor
@@ -66,10 +67,7 @@ const Separator = () => <div aria-hidden className="mx-1 h-5 w-px bg-border" />
 function editLink(editor: Editor) {
   const previous = (editor.getAttributes('link').href as string | undefined) ?? ''
   const href = window.prompt('Link URL', previous)
-  if (href === null) return
-  const chain = editor.chain().focus().extendMarkRange('link')
-  if (href.trim() === '') chain.unsetLink().run()
-  else chain.setLink({ href: href.trim() }).run()
+  if (href !== null) applyLinkHref(editor, href)
 }
 
 /** Formatting toolbar for the note editor. */

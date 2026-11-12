@@ -5,6 +5,7 @@ import StarterKit from '@tiptap/starter-kit'
 import { AttachmentFile, type AttachmentDownloader } from './AttachmentFile'
 import { AttachmentImage } from './AttachmentImage'
 import type { AttachmentResolver } from './attachmentRef'
+import { LinkShortcuts } from './links'
 import type { PdfPreviewErrorHandler } from './PdfViewer'
 
 export interface EditorExtensionOptions {
@@ -22,6 +23,9 @@ export interface EditorExtensionOptions {
  * The note schema, shared by the owner's editor and the read-only shared view: StarterKit (whose
  * input rules give markdown shortcuts such as `# `, `- `, `1. `, `> `, `**bold**`, and which
  * includes links), task lists (`[ ] `), `attachment://` images and `attachment://` files (PDF, GPX).
+ * Links never open on a plain click while editing (that places the cursor; the owner's `LinkPopover`
+ * offers Open), but do on Cmd/Ctrl+click (`LinkShortcuts`); in the read-only shared view a plain
+ * click follows the link's `target="_blank"`.
  */
 export function editorExtensions({
   resolveAttachment,
@@ -38,6 +42,7 @@ export function editorExtensions({
         HTMLAttributes: { rel: 'noopener noreferrer nofollow', target: '_blank' },
       },
     }),
+    LinkShortcuts,
     TaskList,
     TaskItem.configure({ nested: true }),
     AttachmentImage.configure({ resolveAttachment }),

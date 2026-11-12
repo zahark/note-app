@@ -11,7 +11,10 @@ serves the API and the built SPA, and all state lives in one data directory.
   mouse or the keyboard (Space picks an item up, arrow keys move it, Space drops, Escape cancels);
   touch screens have no drag — long-press an item or use its "…" menu → "Move to…".
 - TipTap rich-text editor with debounced autosave (a stale save gets a conflict prompt instead of
-  overwriting) and image upload by button, drag or paste (PNG/JPEG/WebP/GIF, 10 MB max).
+  overwriting) and image upload by button, drag or paste (PNG/JPEG/WebP/GIF, 10 MB max). Clicking a
+  link places the cursor and shows a small popup with its URL and **Open** (new tab), **Edit** and
+  **Remove**; Cmd+click (macOS) / Ctrl+click opens it directly. Only http, https and mailto links are
+  ever opened. In shared notes a plain click opens a link in a new tab.
 - File attachments by the toolbar's **Attach file** button, drag or paste (the server checks each
   file's content, never its name or declared type):
   - **PDF** (25 MB max): a small in-note viewer (one page at a time, previous/next, "page i of n") plus
