@@ -13,7 +13,20 @@ import { buildApp, scheduleAttachmentSweep, SWEEP_INTERVAL_MS } from '../src/app
 import { openDb } from '../src/db/index.js'
 import { SWEEP_GRACE_SEC, sweepAttachments, uploadsDir } from '../src/services/attachments.js'
 import { closeApp, makeApp, testConfig, type TestApp } from './helpers/auth.js'
-import { api, doc, docWithImages, loginAs, PNG, tmpDataDir, uploadPng, type TestUser } from './helpers/api.js'
+import {
+  api,
+  doc,
+  docWithFiles,
+  docWithImages,
+  GPX,
+  loginAs,
+  PDF,
+  PNG,
+  tmpDataDir,
+  uploadFile,
+  uploadPng,
+  type TestUser,
+} from './helpers/api.js'
 
 const DAY = 24 * 60 * 60
 const realNow = () => Math.floor(Date.now() / 1000)
@@ -160,6 +173,26 @@ describe('cross-note references', () => {
     expect(links(b)).toEqual([aid])
     await sweep(30 * DAY)
     expect(await loads(alice, aid)).toBe(true)
+  })
+
+  it('a PDF/GPX file node copied into B survives deleting note A and the sweep; dropped from both, it is swept', async () => {
+    const pdf = await uploadFile(t.app, alice, { data: PDF, contentType: 'application/pdf', filename: 'route.pdf' })
+    const gpx = await uploadFile(t.app, alice, { data: GPX, contentType: '', filename: 'ridge.gpx' })
+    const [a, b] = [await newNote(alice), await newNote(alice)]
+    await save(alice, a, docWithFiles(pdf, gpx))
+    await save(alice, b, docWithFiles(pdf, gpx))
+    expect(links(b)).toEqual([pdf, gpx].sort())
+    expect((await api(t.app, alice, 'DELETE', `/api/notes/${a}`)).statusCode).toBe(204)
+    expect(await sweep(30 * DAY)).toEqual({ attachments: 0, strays: 0 })
+    const res = await api(t.app, alice, 'GET', `/api/attachments/${pdf}`)
+    expect(res.statusCode).toBe(200)
+    expect(res.rawPayload).toEqual(PDF)
+    expect(fileExists(gpx)).toBe(true)
+
+    await save(alice, b, doc('no files left'))
+    expect(await sweep(SWEEP_GRACE_SEC + 60)).toEqual({ attachments: 2, strays: 0 })
+    expect(attachment(pdf)).toBeUndefined()
+    expect(attachment(gpx)).toBeUndefined()
   })
 
   it("an image copied into B survives deleting A's folder and a grandparent folder of A", async () => {

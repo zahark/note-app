@@ -145,12 +145,15 @@
 - [x] run E2E — must pass before task 8
 
 ### Task 8: Verify acceptance criteria
-- [ ] verify all requirements from Overview are implemented
-- [ ] verify edge cases: renamed extensions, BOM GPX, DOCTYPE GPX rejected, oversized files, quota, copy/paste of file nodes across notes, deleting the source note keeps a copied PDF (sweep rules)
-- [ ] run full test suite: `npm test`
-- [ ] run lint: `npm run lint`
-- [ ] run e2e tests: `npx playwright test`
-- [ ] build the Docker image and confirm a PDF upload and preview work in the container (Colima is installed)
+- [x] verify all requirements from Overview are implemented
+  - PDF viewer (page canvas, previous/next, "page i of n", download), GPX chip with download, owner and shared (PIN) paths: covered by the E2E smoke and the unit tests; no schema change
+- [x] verify edge cases: renamed extensions, BOM GPX, DOCTYPE GPX rejected, oversized files, quota, copy/paste of file nodes across notes, deleting the source note keeps a copied PDF (sweep rules)
+  - all already covered (`attachments.test.ts`, `AttachmentFile.test.ts`) except the last one for file nodes: ➕ added `attachment-lifecycle.test.ts` "a PDF/GPX file node copied into B survives deleting note A and the sweep; dropped from both, it is swept"
+- [x] run full test suite: `npm test`
+- [x] run lint: `npm run lint`
+- [x] run e2e tests: `npx playwright test`
+- [x] build the Docker image and confirm a PDF upload and preview work in the container (Colima is installed)
+  - built under a separate compose project (`-p notesverify`, own image tag, port 127.0.0.1:3300, own volume/network); curl: PDF and GPX uploads 201, `GET /api/attachments/:aid` → `Content-Disposition: attachment; filename=…; filename*=UTF-8''…`, `nosniff`, `Content-Security-Policy: sandbox`, bytes identical; HTML named .pdf → 415; the built SPA serves the lazy `pdf-*.js` chunk and the `pdf.worker.min-*.mjs` worker same-origin; the full Playwright smoke spec passed against the container (PDF viewer pages, GPX download, shared PIN view, no CSP violations); everything torn down afterwards
 
 ### Task 9: [Final] Update documentation
 - [ ] update README.md (Features: PDF viewer and GPX downloads; limits per kind; security note that non-image files are always served as downloads)
