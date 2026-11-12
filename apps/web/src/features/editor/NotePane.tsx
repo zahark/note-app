@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import { useMutation } from '@tanstack/react-query'
+import { NodeSelection } from '@tiptap/pm/state'
 import { EditorContent, useEditor, type Editor } from '@tiptap/react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -96,8 +97,9 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
 
   /**
    * Uploads each file, then inserts it (at `pos`, or at the cursor) as `attachment://<aid>`: an image
-   * node for an image, a file node for a PDF or GPX. A rate limit or full storage stops the batch
-   * with one message instead of one per remaining file.
+   * node for an image, a file node for a PDF or GPX. A selected node (such as the attachment inserted
+   * just before) is kept: the new one goes after it instead of replacing it. A rate limit or full
+   * storage stops the batch with one message instead of one per remaining file.
    */
   const insertAttachments = async (editor: Editor, files: File[], pos?: number) => {
     let at = pos
@@ -112,7 +114,10 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
         const aid = await upload.mutateAsync(file)
         if (editor.isDestroyed) return
         const node = attachmentNode(kind, aid, file)
-        if (at === undefined) {
+        const { selection } = editor.state
+        if (at === undefined && selection instanceof NodeSelection) {
+          editor.chain().focus().insertContentAt(selection.to, node).run()
+        } else if (at === undefined) {
           editor.chain().focus().insertContent(node).run()
         } else {
           // the document may have changed during the upload

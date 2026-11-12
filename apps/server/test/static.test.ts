@@ -156,6 +156,15 @@ describe('Content-Security-Policy', () => {
     expect(CONTENT_SECURITY_POLICY).not.toMatch(/script-src[^;]*unsafe/)
   })
 
+  it("lets the PDF viewer read a shared PDF's blob URL and load its same-origin worker, without eval", () => {
+    const directives = CONTENT_SECURITY_POLICY.split('; ')
+    // the shared view fetches a PDF with its credential into a blob: URL; the viewer reads the bytes from it
+    expect(directives).toContain("connect-src 'self' blob:")
+    // the bundled PDF.js worker is a same-origin file: worker-src and script-src fall back to default-src
+    expect(directives.some((d) => d.startsWith('worker-src') || d.startsWith('script-src'))).toBe(false)
+    expect(CONTENT_SECURITY_POLICY).not.toContain('unsafe-eval')
+  })
+
   it('is not added to assets or JSON responses', async () => {
     expect((await get('/assets/app.js')).headers['content-security-policy']).toBeUndefined()
     expect((await get('/api/health')).headers['content-security-policy']).toBeUndefined()

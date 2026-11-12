@@ -479,6 +479,23 @@ describe('file attachments', () => {
     expect(fileNodes(editor.getJSON())[0]).toMatchObject({ src: `attachment://${AID2}`, kind: 'gpx', name: 'b.gpx' })
   })
 
+  it('attachments inserted one after another at the end of the note never replace each other', async () => {
+    setup()
+    const editor = await findEditor()
+    const user = userEvent.setup({ applyAccept: false })
+    // the cursor at the end of the last paragraph: each inserted block ends up selected
+    act(() => void editor.commands.setTextSelection(editor.state.doc.content.size - 1))
+    await user.upload(screen.getByTestId('image-file-input'), png())
+    await waitFor(() => expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`]))
+    await user.upload(screen.getByTestId('attach-file-input'), pdf())
+
+    await waitFor(() => expect(fileNodes(editor.getJSON())).toHaveLength(1))
+    // the file goes after the image (the editor may add an empty paragraph after a trailing block)
+    expect(editor.getJSON().content!.map((n) => n.type).filter((t) => t !== 'paragraph')).toEqual(['image', 'attachmentFile'])
+    expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`])
+    expect(fileNodes(editor.getJSON())[0]).toMatchObject({ src: `attachment://${AID2}`, kind: 'pdf' })
+  })
+
   it('an unsupported or oversized file shows a clear message and is not uploaded', async () => {
     const { requests } = setup()
     const editor = await findEditor()

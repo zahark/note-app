@@ -136,10 +136,13 @@
 - Create: `e2e/files.ts` (generate a small multi-page PDF and a GPX in code, no binary fixtures)
 - Modify (only if needed): `apps/server/src/app.ts` (CSP)
 
-- [ ] write E2E: in the owner view attach a 2-page PDF and a GPX; the PDF viewer shows "page 1 of 2", next shows page 2 and the canvas has non-zero size; the GPX Download triggers a download whose name and bytes match
-- [ ] in the existing fresh-context shared step, the PDF viewer renders and the GPX downloads with the PIN token
-- [ ] confirm no CSP violations in the browser console for the PDF viewer (worker load, canvas); if one appears, adjust the CSP minimally (never `unsafe-eval`) and add a server test for the header
-- [ ] run E2E — must pass before task 8
+- [x] write E2E: in the owner view attach a 2-page PDF and a GPX; the PDF viewer shows "page 1 of 2", next shows page 2 and the canvas has non-zero size; the GPX Download triggers a download whose name and bytes match
+  - the generated PDF has a red page 1 and a blue page 2, so the test also checks the canvas center pixel per page
+- [x] in the existing fresh-context shared step, the PDF viewer renders and the GPX downloads with the PIN token
+- [x] confirm no CSP violations in the browser console for the PDF viewer (worker load, canvas); if one appears, adjust the CSP minimally (never `unsafe-eval`) and add a server test for the header
+  - owner view: none. Shared view: the viewer's `fetch` of its blob URL was blocked (`connect-src` fell back to `default-src 'self'`), so the shared PDF showed "Preview unavailable". Fixed by adding `connect-src 'self' blob:` to the page CSP (`apps/server/src/app.ts`), with a test in `apps/server/test/static.test.ts`; the worker loads under `default-src 'self'`, no eval needed
+- ➕ [x] fix: an attachment inserted at the cursor replaced the previously inserted one (the inserted block stays node-selected at the end of a note); `insertAttachments` now inserts after a selected node (`NotePane.tsx`, test in `NotePane.test.ts`)
+- [x] run E2E — must pass before task 8
 
 ### Task 8: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented

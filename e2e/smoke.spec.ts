@@ -1,10 +1,13 @@
-import { expect, test, type Locator, type Page } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
+import { expect, test, type Download, type Locator, type Page } from '@playwright/test'
+import { gpxTrack, solidPdf } from './files'
 import { solidPng } from './png'
 
 /**
  * Smoke path through the production build: sign up, organize, write with images, share by PIN and
  * read the share in a fresh browser, then check that images survive reloads, renames and the
- * deletion of the note they were first pasted into.
+ * deletion of the note they were first pasted into. A PDF (in-note viewer) and a GPX (download chip)
+ * go along the same owner and shared paths, with no Content-Security-Policy violation on the way.
  */
 
 const PASSWORD = 'correct horse battery staple'
@@ -14,6 +17,14 @@ const email = `owner-${Date.now()}@example.com`
 
 const IMAGE_A = { name: 'red.png', mimeType: 'image/png', buffer: solidPng(8, 6, [220, 40, 40]) }
 const IMAGE_C = { name: 'blue.png', mimeType: 'image/png', buffer: solidPng(12, 9, [40, 60, 220]) }
+// a red first page and a blue second one, so the canvas shows which page is drawn
+const PDF = { name: 'route guide.pdf', mimeType: 'application/pdf', buffer: solidPdf([[1, 0, 0], [0, 0, 1]]) }
+// browsers often report a GPX with no type at all: the client routes it by extension, the server by content
+const GPX = {
+  name: 'ridge loop.gpx',
+  mimeType: '',
+  buffer: gpxTrack('Ridge loop', [[46.5, 7.9], [46.51, 7.91], [46.52, 7.9]]),
+}
 
 const tree = (page: Page) => page.getByRole('tree', { name: 'Folders and notes' })
 const treeItem = (scope: Page | Locator, name: string) => scope.getByRole('treeitem', { name, exact: true })
@@ -41,6 +52,77 @@ async function insertImage(page: Page, file: typeof IMAGE_A) {
     await page.getByTestId('image-file-input').setInputFiles(file)
     expect((await upload).status()).toBe(201)
   })
+}
+
+/** Uploads a PDF or GPX through the toolbar's "Attach file" input and waits until the note is saved. */
+async function attachFile(page: Page, file: typeof PDF) {
+  const upload = page.waitForResponse(isPath(/^\/api\/attachments$/, 'POST'))
+  await expectSaved(page, async () => {
+    await page.getByTestId('attach-file-input').setInputFiles(file)
+    expect((await upload).status()).toBe(201)
+  })
+}
+
+/**
+ * Collects Content-Security-Policy violations on `page` (and on pages opened later in its context):
+ * `securitypolicyviolation` events reported by an init script, plus CSP console errors (which also
+ * cover the PDF.js worker). Install it before the first navigation.
+ */
+async function watchCsp(page: Page): Promise<string[]> {
+  const violations: string[] = []
+  await page.exposeBinding('__reportCspViolation', (_source, message: string) => violations.push(message))
+  await page.addInitScript(() => {
+    document.addEventListener('securitypolicyviolation', (event) => {
+      const report = (window as unknown as { __reportCspViolation: (message: string) => void }).__reportCspViolation
+      void report(`${event.violatedDirective} blocked ${event.blockedURI || '(inline)'}`)
+    })
+  })
+  page.on('console', (message) => {
+    if (/Content[- ]Security[- ]Policy/i.test(message.text())) violations.push(message.text())
+  })
+  return violations
+}
+
+/** The RGB of the pixel at the center of a canvas. */
+async function canvasCenterRgb(canvas: Locator): Promise<number[]> {
+  return canvas.evaluate((element: HTMLCanvasElement) => {
+    const context = element.getContext('2d')!
+    const pixel = context.getImageData(Math.floor(element.width / 2), Math.floor(element.height / 2), 1, 1).data
+    return Array.from(pixel.subarray(0, 3))
+  })
+}
+
+/** Checks the PDF viewer inside `scope`: page 1 of 2 drawn red, Next draws page 2 blue, then Previous back. */
+async function expectPdfViewerWorks(scope: Locator) {
+  const viewer = scope.locator('.attachment-file[data-kind="pdf"] .pdf-viewer')
+  await expect(viewer).toHaveAttribute('data-state', 'ready')
+  await expect(viewer.getByText('Page 1 of 2', { exact: true })).toBeVisible()
+  const canvas = viewer.locator('canvas')
+  await expect(canvas).toBeVisible()
+  const size = (await canvas.boundingBox())!
+  expect(size.width).toBeGreaterThan(0)
+  expect(size.height).toBeGreaterThan(0)
+  await expect.poll(() => canvasCenterRgb(canvas)).toEqual([255, 0, 0])
+
+  const previous = viewer.getByRole('button', { name: 'Previous page' })
+  const next = viewer.getByRole('button', { name: 'Next page' })
+  await expect(previous).toBeDisabled()
+  await next.click()
+  await expect(viewer.getByText('Page 2 of 2', { exact: true })).toBeVisible()
+  await expect(next).toBeDisabled()
+  await expect.poll(() => canvasCenterRgb(canvas)).toEqual([0, 0, 255])
+  await previous.click()
+  await expect(viewer.getByText('Page 1 of 2', { exact: true })).toBeVisible()
+  await expect.poll(() => canvasCenterRgb(canvas)).toEqual([255, 0, 0])
+}
+
+/** Clicks the GPX chip's Download button in `scope` and checks the saved file's name and bytes. */
+async function expectGpxDownload(page: Page, scope: Locator) {
+  const downloaded: Promise<Download> = page.waitForEvent('download')
+  await scope.getByRole('button', { name: `Download ${GPX.name}` }).click()
+  const download = await downloaded
+  expect(download.suggestedFilename()).toBe(GPX.name)
+  expect(await readFile((await download.path())!)).toEqual(GPX.buffer)
 }
 
 /** Creates a note at the root, names it, and leaves the cursor in its content. Returns its id. */
@@ -78,11 +160,12 @@ async function expectImageLoaded(img: Locator, width: number) {
   await expect(img).toHaveJSProperty('naturalWidth', width)
 }
 
-test('notes smoke path: organize, write, upload, share by PIN, copy images across notes', async ({ page, browser }) => {
+test('notes smoke path: organize, write, upload images and files, share by PIN, copy images across notes', async ({ page, browser }) => {
   test.setTimeout(120_000)
   let noteAId = ''
   let pinLink = ''
   let pin = ''
+  const cspViolations = await watchCsp(page)
 
   await test.step('sign up', async () => {
     await page.goto('/')
@@ -124,6 +207,27 @@ test('notes smoke path: organize, write, upload, share by PIN, copy images acros
     await expect(img).toHaveAttribute('src', /^\/api\/attachments\/[0-9a-f-]+$/)
   })
 
+  await test.step('attach a PDF and a GPX to note A: the PDF previews, the GPX downloads', async () => {
+    await attachFile(page, PDF)
+    await attachFile(page, GPX)
+    const content = noteContent(page)
+    // the image is still there next to the two file chips
+    await expect(content.locator('img[data-attachment-id]')).toHaveCount(1)
+    await expect(content.locator('.attachment-file[data-kind="gpx"]')).toContainText(GPX.name)
+    await expect(content.locator('.attachment-file[data-kind="pdf"]')).toContainText(PDF.name)
+    // no viewer for a GPX
+    await expect(content.locator('.attachment-file[data-kind="gpx"] .pdf-viewer')).toHaveCount(0)
+
+    await expectPdfViewerWorks(content)
+    await expectGpxDownload(page, content)
+
+    // the stored content keeps only references, and both files are linked to the note
+    const saved = JSON.stringify((await (await page.request.get(`/api/notes/${noteAId}`)).json()).note.content)
+    expect(saved.match(/attachment:\/\/[0-9a-f-]{36}/g)).toHaveLength(3)
+    expect(saved).not.toContain('/api/attachments/')
+    expect(cspViolations).toEqual([])
+  })
+
   await test.step('share note A by PIN', async () => {
     await page.getByRole('button', { name: 'Share', exact: true }).click()
     const dialog = page.getByRole('dialog')
@@ -140,6 +244,9 @@ test('notes smoke path: organize, write, upload, share by PIN, copy images acros
     const visitor = await browser.newContext()
     try {
       const shared = await visitor.newPage()
+      const sharedCspViolations = await watchCsp(shared)
+      const requested: string[] = []
+      shared.on('request', (request) => requested.push(request.url()))
       await shared.goto(pinLink)
       await expect(shared.getByRole('heading', { name: 'This note is protected' })).toBeVisible()
       await shared.getByLabel('PIN').fill(pin)
@@ -158,8 +265,13 @@ test('notes smoke path: organize, write, upload, share by PIN, copy images acros
       const img = content.locator('img[data-attachment-id]')
       await expectImageLoaded(img, 8)
       await expect(img).toHaveAttribute('src', /^blob:/)
-      // the token stays in memory, never in the URL
+      // the PDF is previewed from bytes fetched with the token, and the GPX downloads as a named blob
+      await expectPdfViewerWorks(content)
+      await expectGpxDownload(shared, content)
+      expect(sharedCspViolations).toEqual([])
+      // the token stays in memory, never in the URL (the page's or any request's)
       expect(shared.url()).toBe(pinLink)
+      expect(requested.filter((url) => url.includes(encodeURIComponent(pin)) || url.includes(pin))).toEqual([])
     } finally {
       await visitor.close()
     }

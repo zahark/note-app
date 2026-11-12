@@ -68,11 +68,15 @@ export const SWEEP_INTERVAL_MS = DAY_MS
 /**
  * Content-Security-Policy for the web app's pages (defense in depth: the shared page renders content
  * written by other users). Scripts, styles and images come from this origin only; attachment images are
- * shown through `blob:` URLs; inline styles are allowed for the UI libraries' positioning.
+ * shown through `blob:` URLs; inline styles are allowed for the UI libraries' positioning. The shared
+ * view's PDF viewer reads a PDF's bytes back from the `blob:` URL it fetched with its credential
+ * (`connect-src`); the bundled PDF.js worker is a same-origin script (`worker-src` falls back to
+ * `default-src`), and nothing needs eval.
  */
 export const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "img-src 'self' blob:",
+  "connect-src 'self' blob:",
   "style-src 'self' 'unsafe-inline'",
   "object-src 'none'",
   "base-uri 'self'",
