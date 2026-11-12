@@ -9,5 +9,8 @@ export const HOUR_SEC = 60 * 60
 export const DAY_SEC = 24 * HOUR_SEC
 export const DAY_MS = DAY_SEC * SECOND_MS
 
+/** One kibibyte. */
+export const KIB = 1024
+
 /** One mebibyte. */
 export const MIB = 1024 * 1024

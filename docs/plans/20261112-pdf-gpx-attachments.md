@@ -64,11 +64,11 @@
 - Modify: `apps/server/src/services/attachments.ts`
 - Modify: `apps/server/test/attachments.test.ts`
 
-- [ ] write tests: PDF bytes (`%PDF-1.7…`) stored as `application/pdf`; GPX with and without BOM / XML declaration / leading comments stored as `application/gpx+xml`; a declared type or file extension that disagrees is ignored; generic XML (`<kml>`, `<svg>`), a GPX with `<!DOCTYPE`/`<!ENTITY`, an HTML file, and random bytes → 415
-- [ ] write tests: images over 10 MiB → 413; PDF/GPX up to 25 MiB accepted, over 25 MiB → 413; quota and upload rate limit apply to PDF/GPX exactly as to images
-- [ ] implement `detectAttachmentKind(buf)` (image kinds via existing `detectImageMime`, `%PDF-`, the GPX sniff from Solution Overview) and per-kind limits in `storeUpload`; raise the multipart `fileSize` limit to the larger limit
-- [ ] update error messages and `displayName` fallback per kind
-- [ ] run tests — must pass before task 2
+- [x] write tests: PDF bytes (`%PDF-1.7…`) stored as `application/pdf`; GPX with and without BOM / XML declaration / leading comments stored as `application/gpx+xml`; a declared type or file extension that disagrees is ignored; generic XML (`<kml>`, `<svg>`), a GPX with `<!DOCTYPE`/`<!ENTITY`, an HTML file, and random bytes → 415
+- [x] write tests: images over 10 MiB → 413; PDF/GPX up to 25 MiB accepted, over 25 MiB → 413; quota and upload rate limit apply to PDF/GPX exactly as to images
+- [x] implement `detectAttachmentKind(buf)` (image kinds via existing `detectImageMime`, `%PDF-`, the GPX sniff from Solution Overview) and per-kind limits in `storeUpload`; raise the multipart `fileSize` limit to the larger limit
+- [x] update error messages and `displayName` fallback per kind
+- [x] run tests — must pass before task 2
 
 ### Task 2: Download headers on owner and shared routes
 

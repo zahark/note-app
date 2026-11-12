@@ -1,12 +1,15 @@
-// Attachment upload and owner fetch: magic-byte validation, size limit, random storage names and
-// owner scoping.
+// Attachment upload and owner fetch: content-based type detection (images, PDF, GPX), per-kind size
+// limits, random storage names and owner scoping.
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  detectAttachmentKind,
   detectImageMime,
   extractAttachmentIds,
-  MAX_ATTACHMENT_BYTES,
+  GPX_SNIFF_BYTES,
+  MAX_FILE_BYTES,
+  MAX_IMAGE_BYTES,
   UPLOAD_LIMIT,
   uploadsDir,
 } from '../src/services/attachments.js'
@@ -19,6 +22,19 @@ const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 
 const GIF = Buffer.from('GIF89a\x01\x00\x01\x00\x00\x00\x00;', 'latin1')
 const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.from([0x1a, 0, 0, 0]), Buffer.from('WEBPVP8 ')])
 const SVG = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')
+const PDF = Buffer.from('%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\n%%EOF\n', 'latin1')
+const GPX_BODY = '<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Ridge</name></trk></gpx>'
+const GPX = Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>\n${GPX_BODY}\n`)
+const BOM = Buffer.from([0xef, 0xbb, 0xbf])
+const KML = Buffer.from('<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"></kml>')
+const HTML = Buffer.from('<!doctype html><html><body><script>alert(1)</script></body></html>')
+const DOCTYPE_GPX = Buffer.from(`<?xml version="1.0"?>\n<!DOCTYPE gpx [<!ENTITY x "boom">]>\n${GPX_BODY}`)
+const ENTITY_GPX = Buffer.from(`${GPX_BODY}<!-- <!ENTITY x "boom"> -->`)
+
+/** `head` padded to exactly `bytes` with `fill`, for size-limit tests that still pass type detection. */
+const padTo = (head: Buffer, bytes: number, fill = 0) => Buffer.concat([head, Buffer.alloc(bytes - head.length, fill)])
+/** A GPX of exactly `bytes`: trailing whitespace keeps it valid text after the root element. */
+const gpxOf = (bytes: number) => padTo(GPX, bytes, 0x20)
 
 let dataDir: string
 let t: TestApp
@@ -58,6 +74,62 @@ describe('detectImageMime', () => {
     ['RIFF that is not WebP', Buffer.from('RIFF\x00\x00\x00\x00WAVEfmt ', 'latin1')],
   ])('rejects %s', (_name, bytes) => {
     expect(detectImageMime(bytes)).toBeNull()
+  })
+})
+
+describe('detectAttachmentKind', () => {
+  it.each([
+    ['PNG', PNG, { kind: 'image', mime: 'image/png' }],
+    ['WebP', WEBP, { kind: 'image', mime: 'image/webp' }],
+    ['PDF', PDF, { kind: 'pdf', mime: 'application/pdf' }],
+    ['GPX with an XML declaration', GPX, { kind: 'gpx', mime: 'application/gpx+xml' }],
+    ['GPX without an XML declaration', Buffer.from(GPX_BODY), { kind: 'gpx', mime: 'application/gpx+xml' }],
+    ['GPX with a UTF-8 BOM', Buffer.concat([BOM, GPX]), { kind: 'gpx', mime: 'application/gpx+xml' }],
+    [
+      'GPX with leading comments and whitespace',
+      Buffer.from(`<?xml version="1.0"?>\n<!-- exported -->\n  <!-- by <gpx>-ish app -->\r\n\t${GPX_BODY}`),
+      { kind: 'gpx', mime: 'application/gpx+xml' },
+    ],
+    ['self-closing empty GPX', Buffer.from('<gpx/>'), { kind: 'gpx', mime: 'application/gpx+xml' }],
+    ['GPX with non-ASCII text', Buffer.from(`<gpx><name>Перевал Ö</name></gpx>`), { kind: 'gpx', mime: 'application/gpx+xml' }],
+  ])('recognises %s', (_name, bytes, expected) => {
+    expect(detectAttachmentKind(bytes)).toEqual(expected)
+  })
+
+  it.each([
+    ['SVG', SVG],
+    ['KML', KML],
+    ['HTML', HTML],
+    ['GPX with a DOCTYPE', DOCTYPE_GPX],
+    ['GPX with an ENTITY declaration (even inside a comment)', ENTITY_GPX],
+    ['lower-case doctype', Buffer.from(`<!doctype gpx>${GPX_BODY}`)],
+    ['namespace-prefixed root', Buffer.from('<g:gpx xmlns:g="http://www.topografix.com/GPX/1/1"></g:gpx>')],
+    ['root whose name only starts with gpx', Buffer.from('<gpxdata></gpxdata>')],
+    ['gpx element that is not the root', Buffer.from('<kml><gpx></gpx></kml>')],
+    ['text before the root', Buffer.from(`hello ${GPX_BODY}`)],
+    ['a processing instruction other than the XML declaration', Buffer.from(`<?xml-stylesheet href="x"?>${GPX_BODY}`)],
+    ['an unterminated XML declaration', Buffer.from('<?xml version="1.0"')],
+    ['an unterminated comment', Buffer.from(`<!-- ${GPX_BODY}`)],
+    ['invalid UTF-8', Buffer.concat([Buffer.from('<gpx><name>'), Buffer.from([0xc3, 0x28]), Buffer.from('</name></gpx>')])],
+    ['UTF-16 GPX', Buffer.from(`\ufeff${GPX_BODY}`, 'utf16le')],
+    ['PDF signature not at the start', Buffer.concat([Buffer.from(' '), PDF])],
+    ['random bytes', Buffer.from([0x00, 0x13, 0x37, 0xde, 0xad, 0xbe, 0xef, 0x42])],
+    ['empty', Buffer.alloc(0)],
+  ])('rejects %s', (_name, bytes) => {
+    expect(detectAttachmentKind(bytes)).toBeNull()
+  })
+
+  it('tolerates a multi-byte character cut at the sniff boundary', () => {
+    const head = Buffer.from(`${GPX_BODY}<!--`)
+    const filler = Buffer.alloc(GPX_SNIFF_BYTES - head.length - 1, 0x61)
+    // "Ж" is two bytes; its first byte is the last sniffed byte
+    const data = Buffer.concat([head, filler, Buffer.from('Ж-->')])
+    expect(detectAttachmentKind(data)).toEqual({ kind: 'gpx', mime: 'application/gpx+xml' })
+  })
+
+  it('does not find a root element that starts past the sniffed prefix', () => {
+    const data = Buffer.concat([Buffer.from(`<!--${' '.repeat(GPX_SNIFF_BYTES)}-->`), Buffer.from(GPX_BODY)])
+    expect(detectAttachmentKind(data)).toBeNull()
   })
 })
 
@@ -132,29 +204,114 @@ describe('POST /api/attachments', () => {
     expect((await api(t.app, alice, 'GET', `/api/attachments/${id}`)).headers['content-type']).toBe(detected)
   })
 
-  it('rejects a file over 10 MB with 413 and stores nothing', async () => {
-    const data = Buffer.concat([PNG, Buffer.alloc(MAX_ATTACHMENT_BYTES)])
+  it('rejects an image over 10 MB with 413 and stores nothing', async () => {
+    const data = padTo(PNG, MAX_IMAGE_BYTES + 1)
     const res = await upload(t.app, alice, { data })
     expect(res.statusCode).toBe(413)
-    expect(errorCode(res)).toBe('PAYLOAD_TOO_LARGE')
+    expect(res.json()).toEqual({ error: { code: 'PAYLOAD_TOO_LARGE', message: 'Images are limited to 10 MB' } })
     expect(attachmentRows()).toBe(0)
     expect(uploadedFiles()).toEqual([])
   })
 
-  it('accepts a file of exactly 10 MB', async () => {
-    const data = Buffer.concat([PNG, Buffer.alloc(MAX_ATTACHMENT_BYTES - PNG.length)])
-    const res = await upload(t.app, alice, { data })
+  it('accepts an image of exactly 10 MB', async () => {
+    const res = await upload(t.app, alice, { data: padTo(PNG, MAX_IMAGE_BYTES) })
     expect(res.statusCode).toBe(201)
+  })
+
+  it.each([
+    ['PDF', () => padTo(PDF, MAX_FILE_BYTES), 'application/pdf'],
+    ['GPX', () => gpxOf(MAX_FILE_BYTES), 'application/gpx+xml'],
+  ])('accepts a %s of exactly 25 MB', async (_name, data, mime) => {
+    const res = await upload(t.app, alice, { data: data(), contentType: 'application/octet-stream' })
+    expect(res.statusCode).toBe(201)
+    const { id } = res.json() as { id: string }
+    expect(t.db.prepare('SELECT mime, size FROM attachments WHERE id = ?').get(id)).toEqual({
+      mime,
+      size: MAX_FILE_BYTES,
+    })
+  })
+
+  it.each([
+    ['PDF', () => padTo(PDF, MAX_FILE_BYTES + 1)],
+    ['GPX', () => gpxOf(MAX_FILE_BYTES + 1)],
+  ])('rejects a %s over 25 MB with 413 and stores nothing', async (_name, data) => {
+    const res = await upload(t.app, alice, { data: data(), contentType: 'application/octet-stream' })
+    expect(res.statusCode).toBe(413)
+    expect(res.json()).toEqual({
+      error: { code: 'PAYLOAD_TOO_LARGE', message: 'Files are limited to 25 MB (images to 10 MB)' },
+    })
+    expect(attachmentRows()).toBe(0)
+    expect(uploadedFiles()).toEqual([])
+  })
+
+  it('stores a PDF as application/pdf and serves it back', async () => {
+    const res = await upload(t.app, alice, { data: PDF, contentType: 'application/pdf', filename: 'route.pdf' })
+    expect(res.statusCode).toBe(201)
+    const { id } = res.json() as { id: string }
+    const row = t.db.prepare('SELECT * FROM attachments WHERE id = ?').get(id) as Record<string, unknown>
+    expect(row).toMatchObject({ user_id: alice.id, original_name: 'route.pdf', mime: 'application/pdf', size: PDF.length })
+    expect(readFileSync(path.join(uploadsDir(dataDir), row.storage_name as string))).toEqual(PDF)
+    const get = await api(t.app, alice, 'GET', `/api/attachments/${id}`)
+    expect(get.headers['content-type']).toBe('application/pdf')
+    expect(get.rawPayload).toEqual(PDF)
+  })
+
+  it.each([
+    ['with an XML declaration', GPX],
+    ['without an XML declaration', Buffer.from(GPX_BODY)],
+    ['with a BOM', Buffer.concat([BOM, GPX])],
+    ['with leading comments', Buffer.from(`<!-- Garmin -->\n<!-- export -->\n${GPX_BODY}`)],
+  ])('stores a GPX %s as application/gpx+xml', async (_name, data) => {
+    const res = await upload(t.app, alice, { data, contentType: '', filename: 'ridge.gpx' })
+    expect(res.statusCode).toBe(201)
+    const { id } = res.json() as { id: string }
+    expect(t.db.prepare('SELECT mime, original_name FROM attachments WHERE id = ?').get(id)).toEqual({
+      mime: 'application/gpx+xml',
+      original_name: 'ridge.gpx',
+    })
+  })
+
+  it.each([
+    ['PDF bytes named .gpx and declared as PNG', { data: PDF, contentType: 'image/png', filename: 'x.gpx' }, 'application/pdf'],
+    ['GPX bytes named .pdf and declared as PDF', { data: GPX, contentType: 'application/pdf', filename: 'x.pdf' }, 'application/gpx+xml'],
+    ['GPX bytes named .png and declared as PNG', { data: GPX, contentType: 'image/png', filename: 'x.png' }, 'application/gpx+xml'],
+  ])('ignores a disagreeing declared type and extension: %s', async (_name, file, detected) => {
+    const res = await upload(t.app, alice, file)
+    expect(res.statusCode).toBe(201)
+    const { id } = res.json() as { id: string }
+    expect(t.db.prepare('SELECT mime FROM attachments WHERE id = ?').pluck().get(id)).toBe(detected)
+  })
+
+  it.each([
+    ['an image', PNG, 'image'],
+    ['a PDF', PDF, 'document.pdf'],
+    ['a GPX', GPX, 'track.gpx'],
+  ])('falls back to a per-kind name for %s uploaded without a usable file name', async (_name, data, name) => {
+    const res = await upload(t.app, alice, { data, filename: 'folder/' })
+    expect(res.statusCode).toBe(201)
+    const { id } = res.json() as { id: string }
+    expect(t.db.prepare('SELECT original_name FROM attachments WHERE id = ?').pluck().get(id)).toBe(name)
   })
 
   it.each([
     ['SVG declared as SVG', { data: SVG, contentType: 'image/svg+xml', filename: 'x.svg' }],
     ['SVG declared as PNG', { data: SVG, contentType: 'image/png' }],
     ['text with a PNG mime (wrong magic bytes)', { data: Buffer.from('not an image'), contentType: 'image/png' }],
+    ['KML named .gpx', { data: KML, contentType: 'application/gpx+xml', filename: 'x.gpx' }],
+    ['SVG named .gpx', { data: SVG, contentType: 'application/gpx+xml', filename: 'x.gpx' }],
+    ['a GPX with a DOCTYPE', { data: DOCTYPE_GPX, contentType: 'application/gpx+xml', filename: 'x.gpx' }],
+    ['a GPX with an ENTITY', { data: ENTITY_GPX, contentType: 'application/gpx+xml', filename: 'x.gpx' }],
+    ['HTML named .pdf', { data: HTML, contentType: 'application/pdf', filename: 'x.pdf' }],
+    ['random bytes named .pdf', { data: Buffer.from([0x13, 0x37, 0, 1, 2, 3]), contentType: 'application/pdf', filename: 'x.pdf' }],
   ])('rejects %s with 415 and stores nothing', async (_name, file) => {
     const res = await upload(t.app, alice, file)
     expect(res.statusCode).toBe(415)
-    expect(errorCode(res)).toBe('UNSUPPORTED_MEDIA_TYPE')
+    expect(res.json()).toEqual({
+      error: {
+        code: 'UNSUPPORTED_MEDIA_TYPE',
+        message: 'Only PNG, JPEG, WebP and GIF images, PDF files and GPX tracks are allowed',
+      },
+    })
     expect(attachmentRows()).toBe(0)
     expect(uploadedFiles()).toEqual([])
   })
@@ -233,7 +390,7 @@ describe('POST /api/attachments: per-account rate limit', () => {
     const res = await upload(t.app, alice)
     expect(res.statusCode).toBe(429)
     expect(errorCode(res)).toBe('RATE_LIMITED')
-    expect(res.json().error.message).toMatch(/Too many image uploads/)
+    expect(res.json().error.message).toMatch(/Too many uploads/)
     expect(Number(res.headers['retry-after'])).toBeGreaterThan(0)
     expect(attachmentRows()).toBe(UPLOAD_LIMIT.limit)
 
@@ -242,6 +399,19 @@ describe('POST /api/attachments: per-account rate limit', () => {
     // and the window slides
     t.clock.advance(UPLOAD_LIMIT.windowMs)
     expect((await upload(t.app, alice)).statusCode).toBe(201)
+  })
+
+  it('counts PDF and GPX uploads against the same limit as images, and limits them the same way', async () => {
+    for (let i = 0; i < UPLOAD_LIMIT.limit; i++) {
+      const data = [PNG, PDF, GPX][i % 3]
+      expect((await upload(t.app, alice, { data })).statusCode).toBe(201)
+    }
+    for (const data of [PDF, GPX]) {
+      const res = await upload(t.app, alice, { data })
+      expect(res.statusCode).toBe(429)
+      expect(errorCode(res)).toBe('RATE_LIMITED')
+    }
+    expect(attachmentRows()).toBe(UPLOAD_LIMIT.limit)
   })
 })
 
@@ -274,12 +444,24 @@ describe('POST /api/attachments: per-account storage quota', () => {
     const res = await upload(q.app, carol, { data: pngOf(600) })
     expect(res.statusCode).toBe(413)
     expect(errorCode(res)).toBe('QUOTA_EXCEEDED')
-    expect(res.json().error.message).toMatch(/Image storage is full \(1 MB per account\)/)
+    expect(res.json().error.message).toMatch(/Attachment storage is full \(1 MB per account\)/)
     expect(files()).toHaveLength(1)
 
     // what still fits is accepted; the quota is per account
     expect((await upload(q.app, carol, { data: pngOf(400) })).statusCode).toBe(201)
     expect((await upload(q.app, dave, { data: pngOf(600) })).statusCode).toBe(201)
+  })
+
+  it('PDF and GPX files share the quota with images', async () => {
+    expect((await upload(q.app, carol, { data: padTo(PDF, 400 * KIB) })).statusCode).toBe(201)
+    expect((await upload(q.app, carol, { data: padTo(GPX, 400 * KIB, 0x20) })).statusCode).toBe(201)
+    for (const data of [pngOf(300), padTo(PDF, 300 * KIB), padTo(GPX, 300 * KIB, 0x20)]) {
+      const res = await upload(q.app, carol, { data })
+      expect(res.statusCode).toBe(413)
+      expect(errorCode(res)).toBe('QUOTA_EXCEEDED')
+    }
+    expect(files()).toHaveLength(2)
+    expect((await upload(q.app, carol, { data: padTo(GPX, 200 * KIB, 0x20) })).statusCode).toBe(201)
   })
 
   it('a full account is refused before the body is stored', async () => {

@@ -124,7 +124,7 @@ export function saveNoteContent(noteId: string, content: JSONContent, version: n
 /** Image types the server accepts (checked again there by magic bytes). */
 export const ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
 const MIB = 1024 * 1024
-/** Largest image the server accepts (`MAX_ATTACHMENT_BYTES` on the server). */
+/** Largest image the server accepts (`MAX_IMAGE_BYTES` on the server). */
 export const MAX_ATTACHMENT_BYTES = 10 * MIB
 
 /** Why a file cannot be uploaded, or null if it looks acceptable. */

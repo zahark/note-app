@@ -1,9 +1,10 @@
-// Attachment lifecycle: upload (magic-byte check, random on-disk name), `note_attachments` sync on
-// content save, and the sweep that deletes images nothing has referenced for 7 days.
+// Attachment lifecycle: upload (content-based type detection, per-kind size limit, random on-disk
+// name), `note_attachments` sync on content save, and the sweep that deletes files nothing has
+// referenced for 7 days. Three kinds are accepted: images (PNG/JPEG/WebP/GIF), PDF and GPX.
 //
 // Attachments belong to the user, not to a note. A note's references are rebuilt from its content on
 // every content save; deleting a note or folder only removes references (FK cascade, and the
-// `note_attachments_unlinked` trigger stamps `last_unlinked_at`). Images are deleted only by the sweep.
+// `note_attachments_unlinked` trigger stamps `last_unlinked_at`). Files are deleted only by the sweep.
 import { randomBytes } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises'
@@ -18,10 +19,16 @@ import {
 } from '../repos/attachments.js'
 import { saveNoteContent, type SaveContentResult } from '../repos/notes.js'
 import { deleteSweepableAttachments, listAllStorageNames } from '../repos/publicShare.js'
-import { DAY_SEC, HOUR_SEC, MIB, MINUTE_MS } from '../units.js'
+import { DAY_SEC, HOUR_SEC, KIB, MIB, MINUTE_MS } from '../units.js'
 
-/** Largest accepted upload. */
-export const MAX_ATTACHMENT_BYTES = 10 * MIB
+/** Largest accepted image. */
+export const MAX_IMAGE_BYTES = 10 * MIB
+
+/** Largest accepted PDF or GPX file. */
+export const MAX_FILE_BYTES = 25 * MIB
+
+/** Largest accepted upload of any kind (the multipart limit); the per-kind limit is checked after detection. */
+export const MAX_UPLOAD_BYTES = Math.max(MAX_IMAGE_BYTES, MAX_FILE_BYTES)
 
 /**
  * Upload rate limit per account: generous enough for pasting a large batch of screenshots, while
@@ -36,6 +43,25 @@ export const SWEEP_GRACE_SEC = 7 * DAY_SEC
 export const STRAY_GRACE_SEC = HOUR_SEC
 
 export type ImageMime = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+
+export type AttachmentKind = 'image' | 'pdf' | 'gpx'
+
+export type AttachmentMime = ImageMime | 'application/pdf' | 'application/gpx+xml'
+
+export interface DetectedType {
+  kind: AttachmentKind
+  mime: AttachmentMime
+}
+
+/** Per-kind upload limit, display label for error messages, and file-name fallback. */
+const KINDS: Record<AttachmentKind, { maxBytes: number; label: string; fallbackName: string }> = {
+  image: { maxBytes: MAX_IMAGE_BYTES, label: 'Images', fallbackName: 'image' },
+  pdf: { maxBytes: MAX_FILE_BYTES, label: 'PDF files', fallbackName: 'document.pdf' },
+  gpx: { maxBytes: MAX_FILE_BYTES, label: 'GPX files', fallbackName: 'track.gpx' },
+}
+
+/** The GPX sniff looks at this many leading bytes (the DOCTYPE/ENTITY check covers all of them). */
+export const GPX_SNIFF_BYTES = 64 * KIB
 
 /** Directory holding the uploaded files. */
 export const uploadsDir = (dataDir: string): string => path.join(dataDir, 'uploads')
@@ -66,7 +92,55 @@ export function detectImageMime(buf: Buffer): ImageMime | null {
   return null
 }
 
-const unsupported = () => unsupportedMediaType('Only PNG, JPEG, WebP and GIF images are allowed')
+const isXmlSpace = (c: string | undefined): boolean => c === ' ' || c === '\t' || c === '\r' || c === '\n'
+
+/**
+ * True when `buf` looks like a GPX document: UTF-8 text (an optional BOM is skipped) whose first
+ * element, after an optional XML declaration, comments and whitespace, is literally `<gpx` (no
+ * namespace prefix). Any `<!DOCTYPE` or `<!ENTITY` in the first `GPX_SNIFF_BYTES` rejects the file
+ * (no DTDs, so no entity expansion if anything ever parses it). A scanner, not a regex, so the
+ * check stays linear on hostile input.
+ */
+export function isGpx(buf: Buffer): boolean {
+  let text: string
+  try {
+    // `stream: true` tolerates a multi-byte character cut at the end of the sniffed prefix
+    text = new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, GPX_SNIFF_BYTES), { stream: true })
+  } catch {
+    return false
+  }
+  if (/<!(?:DOCTYPE|ENTITY)/i.test(text)) return false
+  let i = 0
+  if (text.startsWith('<?xml', 0) && isXmlSpace(text[5])) {
+    const end = text.indexOf('?>', 5)
+    if (end < 0) return false
+    i = end + 2
+  }
+  for (;;) {
+    while (isXmlSpace(text[i])) i++
+    if (!text.startsWith('<!--', i)) break
+    const end = text.indexOf('-->', i + 4)
+    if (end < 0) return false
+    i = end + 3
+  }
+  const next = text[i + 4]
+  return text.startsWith('<gpx', i) && (isXmlSpace(next) || next === '>' || next === '/')
+}
+
+/**
+ * Detects what an upload is from its content alone (never from the declared type or the extension):
+ * an image by magic bytes, a PDF by a leading `%PDF-`, a GPX by `isGpx`. Returns null for anything else.
+ */
+export function detectAttachmentKind(buf: Buffer): DetectedType | null {
+  const image = detectImageMime(buf)
+  if (image) return { kind: 'image', mime: image }
+  if (startsWith(buf, ascii('%PDF-'))) return { kind: 'pdf', mime: 'application/pdf' }
+  if (isGpx(buf)) return { kind: 'gpx', mime: 'application/gpx+xml' }
+  return null
+}
+
+const unsupported = () =>
+  unsupportedMediaType('Only PNG, JPEG, WebP and GIF images, PDF files and GPX tracks are allowed')
 
 export interface UploadInput {
   /** Client-supplied file name; display only, never used in a path. */
@@ -74,18 +148,19 @@ export interface UploadInput {
   data: Buffer
 }
 
-/** 413 `QUOTA_EXCEEDED`: storing this image would take the account past `UPLOAD_QUOTA_MB`. */
+/** 413 `QUOTA_EXCEEDED`: storing this file would take the account past `UPLOAD_QUOTA_MB`. */
 export const quotaExceeded = (quotaMb: number) =>
   new AppError(
     413,
     'QUOTA_EXCEEDED',
-    `Image storage is full (${quotaMb} MB per account). Remove images you no longer need from your ` +
-      `notes; their space is freed ${SWEEP_GRACE_SEC / DAY_SEC} days after removal`,
+    `Attachment storage is full (${quotaMb} MB per account). Remove images and files you no longer ` +
+      `need from your notes; their space is freed ${SWEEP_GRACE_SEC / DAY_SEC} days after removal`,
   )
 
 /**
- * Throws `quotaExceeded` when the user's stored images plus `incomingBytes` would exceed the quota
- * (`quotaMb` 0 = no limit). Counts every stored image, including unreferenced ones awaiting the sweep.
+ * Throws `quotaExceeded` when the user's stored attachments plus `incomingBytes` would exceed the quota
+ * (`quotaMb` 0 = no limit). Counts every stored file of every kind, including unreferenced ones
+ * awaiting the sweep.
  */
 export function assertWithinQuota(db: Db, userId: string, quotaMb: number, incomingBytes: number): void {
   if (quotaMb <= 0) return
@@ -93,8 +168,9 @@ export function assertWithinQuota(db: Db, userId: string, quotaMb: number, incom
 }
 
 /**
- * Validates and stores an upload: checks size and magic bytes (the browser-declared type is ignored: it
- * comes from the file extension, which is often wrong; the detected type is what gets stored), writes
+ * Validates and stores an upload: detects the kind from the content (the browser-declared type is
+ * ignored: it comes from the file extension, which is often wrong; the detected type is what gets
+ * stored), checks that kind's size limit (`MAX_IMAGE_BYTES` / `MAX_FILE_BYTES`), writes
  * the bytes under a random `storage_name`, then checks the quota and inserts the row (with
  * `last_unlinked_at` NULL) in one synchronous step, so parallel uploads cannot together overshoot it.
  * If the quota check or the insert fails the file is removed again; a file left behind by a crash is a
@@ -107,11 +183,13 @@ export async function storeUpload(
   input: UploadInput,
   quotaMb = 0,
 ): Promise<AttachmentRow> {
-  if (input.data.length > MAX_ATTACHMENT_BYTES) {
-    throw new AppError(413, 'PAYLOAD_TOO_LARGE', `Images are limited to ${MAX_ATTACHMENT_BYTES / MIB} MB`)
+  const detected = detectAttachmentKind(input.data)
+  if (!detected) throw unsupported()
+  const { kind, mime } = detected
+  const { maxBytes, label } = KINDS[kind]
+  if (input.data.length > maxBytes) {
+    throw new AppError(413, 'PAYLOAD_TOO_LARGE', `${label} are limited to ${maxBytes / MIB} MB`)
   }
-  const mime = detectImageMime(input.data)
-  if (!mime) throw unsupported()
 
   const dir = uploadsDir(dataDir)
   mkdirSync(dir, { recursive: true })
@@ -121,7 +199,7 @@ export async function storeUpload(
   try {
     assertWithinQuota(db, userId, quotaMb, input.data.length)
     return createAttachment(db, userId, {
-      originalName: displayName(input.originalName),
+      originalName: displayName(input.originalName, kind),
       storageName,
       mime,
       size: input.data.length,
@@ -132,17 +210,20 @@ export async function storeUpload(
   }
 }
 
-/** Keeps the last path segment of a client file name, capped at 255 chars; falls back to "image". */
-function displayName(name: string): string {
+/**
+ * Keeps the last path segment of a client file name, capped at 255 chars; falls back per kind to
+ * "image", "document.pdf" or "track.gpx".
+ */
+function displayName(name: string, kind: AttachmentKind): string {
   const base = name.split(/[\\/]/).pop()?.trim() ?? ''
-  return base.slice(0, 255) || 'image'
+  return base.slice(0, 255) || KINDS[kind].fallbackName
 }
 
 const ATTACHMENT_REF = /^attachment:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
 
 /**
  * Every attachment id referenced by a TipTap document: any string value in the JSON that is exactly
- * `attachment://<uuid>` (in practice an image node's `src`). Deduplicated, lower-cased.
+ * `attachment://<uuid>` (in practice an image or file node's `src`). Deduplicated, lower-cased.
  */
 export function extractAttachmentIds(content: unknown): string[] {
   const ids = new Set<string>()

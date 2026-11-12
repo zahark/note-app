@@ -1,19 +1,30 @@
 import fastifyMultipart from '@fastify/multipart'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { badRequest, notFound, unsupportedMediaType } from '../errors.js'
+import { AppError, badRequest, notFound, unsupportedMediaType } from '../errors.js'
 import { getAttachment } from '../repos/attachments.js'
 import {
   assertWithinQuota,
-  MAX_ATTACHMENT_BYTES,
+  MAX_FILE_BYTES,
+  MAX_IMAGE_BYTES,
+  MAX_UPLOAD_BYTES,
   readAttachmentFile,
   storeUpload,
   UPLOAD_LIMIT,
 } from '../services/attachments.js'
 import { RateLimiter, type Clock } from '../services/rateLimiter.js'
+import { MIB } from '../units.js'
 import { entityId } from './schemas.js'
 
 const attachmentParams = z.object({ aid: entityId })
+
+/** The 413 for a file cut off at the multipart limit, before its kind is known. */
+const uploadTooLarge = () =>
+  new AppError(
+    413,
+    'PAYLOAD_TOO_LARGE',
+    `Files are limited to ${MAX_FILE_BYTES / MIB} MB (images to ${MAX_IMAGE_BYTES / MIB} MB)`,
+  )
 
 export interface AttachmentRoutesOptions {
   /** Clock for the upload rate limit; a test seam. */
@@ -21,10 +32,10 @@ export interface AttachmentRoutesOptions {
 }
 
 /**
- * `POST /api/attachments` (multipart upload of one image; returns `{id}`) and
+ * `POST /api/attachments` (multipart upload of one image, PDF or GPX file; returns `{id}`) and
  * `GET /api/attachments/:aid` (the caller's own attachment bytes). Every route requires a session;
  * another user's attachment is indistinguishable from a missing one (404). Uploads are limited to
- * `UPLOAD_LIMIT` per account (429) and to `UPLOAD_QUOTA_MB` of stored images per account (413).
+ * `UPLOAD_LIMIT` per account (429) and to `UPLOAD_QUOTA_MB` of stored attachments per account (413).
  */
 export async function attachmentRoutes(
   app: FastifyInstance,
@@ -33,7 +44,7 @@ export async function attachmentRoutes(
   const uploadsPerUser = new RateLimiter({ ...UPLOAD_LIMIT, now })
   app.addHook('onRequest', app.requireAuth)
   await app.register(fastifyMultipart, {
-    limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1, fields: 0, parts: 1 },
+    limits: { fileSize: MAX_UPLOAD_BYTES, files: 1, fields: 0, parts: 1 },
   })
 
   app.post('/api/attachments', async (request, reply) => {
@@ -42,12 +53,18 @@ export async function attachmentRoutes(
     }
     const userId = request.user!.id
     // both checks run before the body is read: a limited or full account costs no disk or memory
-    uploadsPerUser.enforce(userId, 'Too many image uploads, try again in a few minutes')
+    uploadsPerUser.enforce(userId, 'Too many uploads, try again in a few minutes')
     assertWithinQuota(app.db, userId, app.config.uploadQuotaMb, 1)
     const part = await request.file()
     if (!part) throw badRequest('No file uploaded')
-    // throws a 413 once the file exceeds MAX_ATTACHMENT_BYTES
-    const data = await part.toBuffer()
+    // throws once the file exceeds MAX_UPLOAD_BYTES; storeUpload checks the per-kind limit
+    let data: Buffer
+    try {
+      data = await part.toBuffer()
+    } catch (err) {
+      if (err instanceof app.multipartErrors.RequestFileTooLargeError) throw uploadTooLarge()
+      throw err
+    }
     const attachment = await storeUpload(
       app.db,
       app.config.dataDir,
