@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { editorExtensions, toEditorContent } from '@/features/editor/extensions'
 import { displayTitle } from '@/features/tree/buildTree'
 import { isUnreachable } from '@/lib/api'
+import { DownloadRefusedError } from '@/lib/download'
 import { createSharedAttachmentResolver, fetchSharedNote, type SharedCredential, type SharedNote } from './api'
 import { LockScreen } from './LockScreen'
 
@@ -95,14 +96,25 @@ interface SharedNoteContentProps {
  */
 function SharedNoteContent({ noteId, credential, note }: SharedNoteContentProps) {
   const [resolver] = useState(() => createSharedAttachmentResolver(noteId, credential))
-  useEffect(() => () => resolver.dispose(), [resolver])
+  useEffect(() => {
+    resolver.activate()
+    return () => resolver.dispose()
+  }, [resolver])
 
   const editor = useEditor({
     editable: false,
     extensions: editorExtensions({
       resolveAttachment: resolver.resolve,
-      downloadAttachment: (aid, name) => {
-        resolver.download(aid, name).catch(() => toast.error(`Could not download ${name}. Try again in a moment.`))
+      downloadAttachment: (aid, displayName) => {
+        resolver
+          .download(aid)
+          .catch((err: unknown) =>
+            toast.error(
+              err instanceof DownloadRefusedError
+                ? `Could not download ${displayName}: ${err.message}`
+                : `Could not download ${displayName}. Try again in a moment.`,
+            ),
+          )
       },
     }),
     content: toEditorContent(note.content),

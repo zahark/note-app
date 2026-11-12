@@ -15,13 +15,27 @@ serves the API and the built SPA, and all state lives in one data directory.
 - File attachments by the toolbar's **Attach file** button, drag or paste (the server checks each
   file's content, never its name or declared type):
   - **PDF** (25 MB max): a small in-note viewer (one page at a time, previous/next, "page i of n") plus
-    a Download button. The viewer (PDF.js) is a separate chunk loaded only when a note shows a PDF,
-    with its worker served from the app's own origin; it draws pages to a canvas only (no links, forms
-    or PDF scripts).
+    a Download button. The viewer (PDF.js) is a separate chunk loaded only when a note shows a PDF, and
+    each PDF is fetched only once its viewer scrolls into view; the worker, the standard-font data and
+    the CJK CMaps are served from the app's own origin. It draws pages to a canvas only (no links,
+    forms or PDF scripts). Not supported: JPEG 2000 and JBIG2 images (PDF.js decodes them with
+    WebAssembly, which the page CSP does not allow); such pages show blank areas or "Preview
+    unavailable".
   - **GPX** (25 MB max, UTF-8 text): a file chip with name, size and a Download button; no preview.
-    GPX files with a `<!DOCTYPE>` or `<!ENTITY>` are rejected.
+    The root element must be a plain `<gpx>` with only whitespace, an XML declaration and comments
+    before it; GPX files with a `<!DOCTYPE>`, `<!ENTITY>` or any other `<?…?>` instruction (such as
+    `<?xml-stylesheet?>`), a namespace-prefixed root (`<gpx:gpx>`) or a UTF-16 encoding are rejected.
   - Both work in shared notes too (the viewer and downloads use the share's PIN unlock or signed link,
-    which never appears in a URL), and the download keeps the original file name.
+    which never appears in a URL), and the download keeps the original file name, except that a PDF
+    or GPX name always ends in `.pdf` / `.gpx`: the extension is appended when missing
+    (`Route guide.exe` uploaded as a PDF is stored and downloaded as `Route guide.exe.pdf`), so a saved
+    file always opens as the type the server checked.
+  - **Browser support**: the viewer uses PDF.js 6's legacy build (library and worker), which is
+    transpiled and polyfilled for older browsers, so previews also work on older iOS Safari and Android
+    versions that the modern build (it needs brand-new JavaScript such as
+    `Map.prototype.getOrInsertComputed`) would not run on. It costs a somewhat larger lazy chunk (about
+    490 kB instead of 430 kB, plus a 1.3 MB worker), loaded only when a note shows a PDF. If a browser
+    still cannot run it, the viewer shows "Preview unavailable" and Download still works.
 - Sharing with no public access by default, per note, from the **Share** button in the open note's
   header:
   - **PIN**: an 8-character PIN shown once; visitors unlock a read-only view (5 wrong PINs per note
@@ -188,14 +202,18 @@ the host first, or the app cannot write to it.
   Note content has no size quota (only the write rate limits above and a 5 MB limit per save), so every
   account can grow the data volume, which also holds the database. Only allow accounts you trust:
   `ALLOW_SIGNUP=true` on a public deployment lets strangers create accounts that can fill the disk.
-- Uploads are accepted by content only: PNG/JPEG/WebP/GIF images (10 MB), PDF (`%PDF-`, 25 MB) and GPX
-  (UTF-8 XML whose root element is `gpx`, no `<!DOCTYPE>`/`<!ENTITY>`, 25 MB); anything else gets 415.
-  Images are served inline. **Non-image files are always served as downloads**, on the owner route and
-  the shared route alike: `Content-Disposition: attachment` with the original name,
+- Uploads are accepted by content only: PNG/JPEG/WebP/GIF images (10 MB), PDF (starting with `%PDF-`,
+  25 MB) and GPX (UTF-8 XML whose root element is a plain `<gpx`, with only whitespace, an
+  XML declaration and comments before it, within the first 64 KB; no `<!DOCTYPE>`/`<!ENTITY>` and no
+  other `<?…?>` instruction; 25 MB); anything else gets 415.
+  Images are served inline (`Content-Disposition: inline`, named after the stored name with the
+  detected image extension forced, e.g. `x.js` → `x.js.png`). **Non-image files are always served as downloads**, on the owner route and
+  the shared route alike: `Content-Disposition: attachment` with the stored name (ending in `.pdf` / `.gpx`),
   `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox` on the file response, so
   opening a file's URL directly never renders it on the app's origin. The page CSP allows `blob:` in
   `connect-src` (the shared PDF viewer reads its fetched bytes back from a blob URL) and never
-  `unsafe-eval`.
+  `unsafe-eval`. The app's Download button saves only a response the server typed as PDF/GPX, under
+  the server's name (never the name stored in the note); anything else is refused with an error.
 
 Commands inside the container (from the same directory, with the same `-f` files):
 
@@ -218,8 +236,13 @@ docker kill notes-app-app-1                                                # for
 docker ps                                                                  # what is running
 ```
 
-None of these delete your notes: they live in the `notes-data` volume (`notes-app_notes-data` when the
-repository directory is named `notes-app`). Only `down -v` deletes the volume, and that cannot be undone.
+None of these delete your notes: they live in the volume `notes-app_notes-data`. Its name does not
+depend on the directory you run Compose from: `docker-compose.yml` fixes the project name
+(`name: notes-app`), so the volume is always `notes-app_notes-data` and the container `notes-app-app-1`.
+Only `-p <name>` or `COMPOSE_PROJECT_NAME` changes that; if you set one, use `<name>-app-1` in the
+`docker kill` command above and `<name>_notes-data` in the `docker run` commands below. Only `down -v`,
+or pruning unused volumes after a `down` (e.g. `docker volume prune -a`), deletes the volume, and that
+cannot be undone.
 With Colima on a Mac, `colima start` must run first after a reboot (`brew services start colima` starts it
 at login), and `colima stop` frees the VM's memory.
 
@@ -238,41 +261,61 @@ file) and `uploads.tar.gz` (every uploaded file the database copy references, as
 `outDir` defaults to `DATA_DIR/backups`; a relative `outDir` is relative to the directory you run the
 command from.
 
+Bare metal:
+
 ```sh
-npm run backup                                      # bare metal (see below for DATA_DIR)
-docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run backup
-docker compose -f docker-compose.yml -f compose.direct.yml cp app:/data/backups ./backups
+npm run backup                                      # see below for DATA_DIR
 ```
 
-If the container is not running, start it first (`up -d`), then run the two Docker commands.
+Docker: make the backup inside the container (it prints `Backup written to /data/backups/notes-backup-…`),
+then copy that one directory out (replace `XXXX` with
+its timestamp). Copying one named backup into an existing `./backups` keeps the path
+`./backups/notes-backup-XXXX` that the restore below uses, however many times you do it:
+
+```sh
+docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run backup
+mkdir -p backups
+docker compose -f docker-compose.yml -f compose.direct.yml cp app:/data/backups/notes-backup-XXXX ./backups/
+```
+
+If the container is not running, start it first (`up -d`), then run the Docker commands.
 
 Bare metal: the CLIs read `DATA_DIR` only from the environment, not from `.env`, so export the same
 environment as the server first (`set -a; . ./.env; set +a`) or prefix the command with
 `DATA_DIR=/path/to/data`. Otherwise they fall back to `apps/server/data`.
 
-Backups made inside the container land in the `notes-data` volume (`/data/backups`); copy them off the
-host as shown and delete old ones from time to time.
+Backups made inside the container land in the `notes-app_notes-data` volume (`/data/backups`); copy
+them off the host as shown and delete old ones from time to time.
 
 ### Option B: archive the whole volume (while the app is stopped)
 
-An exact copy of everything in `/data`, without starting the app. **Only while the app is stopped**
+An exact copy of everything in `/data` except the Option A snapshots, without starting the app. **Only while the app is stopped**
 (`down` or `stop`): copying the database files while the server writes to them can give an inconsistent
 copy.
 
 ```sh
 mkdir -p ~/notes-backups
 docker run --rm -v notes-app_notes-data:/data -v ~/notes-backups:/out node:22-slim \
-  tar -czf /out/notes-data-$(date +%Y%m%d-%H%M).tar.gz -C /data .
+  tar --exclude=./backups -czf /out/notes-data-$(date +%Y%m%d-%H%M).tar.gz -C /data .
 ```
+
+The archive leaves out `/data/backups` (the Option A snapshots kept in the volume), so archives do not
+grow with every earlier backup; copy those out separately if you want them.
 
 ### Restore
 
-Stop the app first. Bare metal, from an Option A backup, into the data directory:
+Stop the app first. Bare metal, from an Option A backup, into the data directory. Set `DATA_DIR` to the
+**absolute** path of the directory the server uses: a relative `DATA_DIR` (such as `./data` from
+`.env.example`) is resolved by the server against `apps/server`, not against your shell's directory.
+The default is `apps/server/data`; replace `XXXX` with the backup's timestamp:
 
 ```sh
-rm -f "$DATA_DIR"/notes.db-wal "$DATA_DIR"/notes.db-shm   # never mix a restored db with an old WAL
-cp notes-backup-*/notes.db "$DATA_DIR/notes.db"
-tar -xzf notes-backup-*/uploads.tar.gz -C "$DATA_DIR"   # recreates $DATA_DIR/uploads/
+# from the repository root
+DATA_DIR="$PWD/apps/server/data"                  # or your absolute DATA_DIR
+BACKUP="$DATA_DIR/backups/notes-backup-XXXX"      # or wherever the backup is
+rm -f "${DATA_DIR:?}/notes.db-wal" "${DATA_DIR:?}/notes.db-shm"   # never mix a restored db with an old WAL
+cp "$BACKUP/notes.db" "${DATA_DIR:?}/notes.db"
+tar -xzf "$BACKUP/uploads.tar.gz" -C "${DATA_DIR:?}"              # recreates $DATA_DIR/uploads/
 ```
 
 With Docker, into the volume with a one-off container (`--user 1000:1000`: the app runs as uid 1000 and
@@ -283,11 +326,12 @@ docker run --rm -v notes-app_notes-data:/data -v "$PWD/backups/notes-backup-XXXX
   sh -c 'rm -f /data/notes.db-wal /data/notes.db-shm && cp /backup/notes.db /data/ && tar -xzf /backup/uploads.tar.gz -C /data'
 ```
 
-From an Option B archive:
+From an Option B archive (the old WAL files go first here too; an archive taken after a crash brings
+its own):
 
 ```sh
 docker run --rm -v notes-app_notes-data:/data -v ~/notes-backups:/in --user 1000:1000 node:22-slim \
-  sh -c 'tar -xzf /in/notes-data-XXXX.tar.gz -C /data'
+  sh -c 'rm -f /data/notes.db-wal /data/notes.db-shm && tar -xzf /in/notes-data-XXXX.tar.gz -C /data'
 ```
 
 Then start the app again.
@@ -302,7 +346,7 @@ Copy the data and `.env` from the old server, restore into a fresh volume on the
    cd ~/notes-app
    docker compose -f docker-compose.yml -f compose.direct.yml down
    docker run --rm -v notes-app_notes-data:/data -v "$PWD":/out node:22-slim \
-     tar -czf /out/notes-data.tar.gz -C /data .
+     tar --exclude=./backups -czf /out/notes-data.tar.gz -C /data .
    ```
 
 2. **Copy** the archive and `.env` to the new server:
@@ -311,15 +355,19 @@ Copy the data and `.env` from the old server, restore into a fresh volume on the
    scp notes-data.tar.gz .env user@new-server:~/
    ```
 
-3. **New server**: check out the code, start once to create the (empty) volume, stop, restore, start:
+3. **New server**: check out the code, start once to create the (empty) volume, stop, restore, start.
+   The archive goes into a directory of its own that uid 1000 (the app's user in the restore container)
+   can read; your home directory may not be readable by it:
 
    ```sh
-   git clone <your repo> ~/notes-app && cd ~/notes-app      # keep the directory name notes-app
+   git clone <your repo> ~/notes-app && cd ~/notes-app
    mv ~/.env .
+   mkdir -p ~/notes-restore && mv ~/notes-data.tar.gz ~/notes-restore/
+   chmod 755 ~/notes-restore && chmod 644 ~/notes-restore/notes-data.tar.gz
    docker compose -f docker-compose.yml -f compose.direct.yml up -d --build   # creates notes-app_notes-data
    docker compose -f docker-compose.yml -f compose.direct.yml down
-   docker run --rm --user 1000:1000 -v notes-app_notes-data:/data -v ~/:/in node:22-slim \
-     sh -c 'tar -xzf /in/notes-data.tar.gz -C /data'
+   docker run --rm --user 1000:1000 -v notes-app_notes-data:/data -v ~/notes-restore:/in node:22-slim \
+     sh -c 'rm -f /data/notes.db-wal /data/notes.db-shm && tar -xzf /in/notes-data.tar.gz -C /data'
    docker compose -f docker-compose.yml -f compose.direct.yml up -d
    ```
 
@@ -334,9 +382,9 @@ Things that matter when moving:
   new ones.
 - **Do not sign up on the new server before restoring**: with the default signup mode the first signup
   becomes the owner, and the restore overwrites it anyway.
-- **Directory name**: Compose names the volume after the directory (`notes-app_notes-data`). If you use
-  another directory name, add `-p notes-app` to every `docker compose` command, or use that name's volume
-  in the `docker run` commands.
+- **Directory name** does not matter: the compose file fixes the project name (`name: notes-app`), so
+  the volume is `notes-app_notes-data` wherever you clone the code. Only `-p`/`COMPOSE_PROJECT_NAME`
+  changes it; if you set one, use `<that name>_notes-data` in the `docker run` commands.
 - Use the `-f` override of your deployment (`compose.nginx.yml`, `compose.tunnel.yml`) in place of
   `compose.direct.yml`, and set `TRUST_PROXY` for the new server's setup (see [Docker](#docker)).
 

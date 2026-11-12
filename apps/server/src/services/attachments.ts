@@ -53,50 +53,106 @@ export interface DetectedType {
   mime: AttachmentMime
 }
 
-/** Per-kind upload limit, display label for error messages, and file-name fallback. */
-const KINDS: Record<AttachmentKind, { maxBytes: number; label: string; fallbackName: string }> = {
-  image: { maxBytes: MAX_IMAGE_BYTES, label: 'Images', fallbackName: 'image' },
-  pdf: { maxBytes: MAX_FILE_BYTES, label: 'PDF files', fallbackName: 'document.pdf' },
-  gpx: { maxBytes: MAX_FILE_BYTES, label: 'GPX files', fallbackName: 'track.gpx' },
+/**
+ * Per-kind upload limit, display label for error messages, file-name fallback, and the extension a
+ * stored file's name is forced to end in at upload (none for images: their names are kept as uploaded,
+ * and their served name gets its extension from the detected image type, see `IMAGE_EXTENSIONS`).
+ */
+const KINDS: Record<AttachmentKind, { maxBytes: number; label: string; fallbackName: string; extension: string }> = {
+  image: { maxBytes: MAX_IMAGE_BYTES, label: 'Images', fallbackName: 'image', extension: '' },
+  pdf: { maxBytes: MAX_FILE_BYTES, label: 'PDF files', fallbackName: 'document.pdf', extension: '.pdf' },
+  gpx: { maxBytes: MAX_FILE_BYTES, label: 'GPX files', fallbackName: 'track.gpx', extension: '.gpx' },
+}
+
+/** The download extension of each non-image stored mime (see `attachmentResponseHeaders`). */
+const MIME_EXTENSIONS: ReadonlyMap<string, string> = new Map([
+  ['application/pdf', KINDS.pdf.extension],
+  ['application/gpx+xml', KINDS.gpx.extension],
+])
+
+/**
+ * The extensions a served image's name may end in, per type; the first is appended when it ends in
+ * none of them (see `attachmentResponseHeaders`).
+ */
+const IMAGE_EXTENSIONS: ReadonlyMap<string, readonly string[]> = new Map<ImageMime, readonly string[]>([
+  ['image/png', ['.png']],
+  ['image/jpeg', ['.jpg', '.jpeg']],
+  ['image/webp', ['.webp']],
+  ['image/gif', ['.gif']],
+])
+
+/** Longest stored file name, in UTF-16 code units. */
+const MAX_NAME_LENGTH = 255
+
+/**
+ * `name` made to end in `extension` (case-insensitive), so a saved download always opens as the
+ * kind that was detected: the extension is appended, never substituted, so the rest of the name stays
+ * as the user wrote it ("Route guide.exe" → "Route guide.exe.pdf"). The result is capped at
+ * `MAX_NAME_LENGTH` with the extension kept. Idempotent; an empty `extension` returns `name` as is.
+ */
+export function withExtension(name: string, extension: string): string {
+  if (!extension || name.toLowerCase().endsWith(extension)) return name
+  return name.slice(0, MAX_NAME_LENGTH - extension.length) + extension
+}
+
+/**
+ * `name` made to end in one of `extensions` (case-insensitive): the first is appended (`withExtension`)
+ * when it ends in none.
+ */
+function withOneOfExtensions(name: string, extensions: readonly string[]): string {
+  const lower = name.toLowerCase()
+  if (extensions.some((extension) => lower.endsWith(extension))) return name
+  return withExtension(name, extensions[0] ?? '')
 }
 
 /** The GPX sniff looks at this many leading bytes (the DOCTYPE/ENTITY check covers all of them). */
 export const GPX_SNIFF_BYTES = 64 * KIB
 
-const IMAGE_MIMES: ReadonlySet<string> = new Set<ImageMime>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
-
 /** RFC 8187 `attr-char`: the bytes a `filename*` value may carry unencoded. */
 const ATTR_CHAR = /^[A-Za-z0-9!#$&+\-.^_`|~]$/
 
 /**
- * A `Content-Disposition: attachment` value naming the download `name`: `filename*` carries the exact
- * name (UTF-8, percent-encoded; a lone surrogate becomes U+FFFD), `filename` an ASCII fallback with
- * everything but printable ASCII, and `"`, `\`, `%`, `;`, replaced by `_`. Neither part can break out
- * of its parameter or inject a header.
+ * A `Content-Disposition` value (`attachment` unless `type` says `inline`) naming the file `name`:
+ * `filename*` carries the exact name (UTF-8, percent-encoded; a lone surrogate becomes U+FFFD),
+ * `filename` an ASCII fallback with everything but printable ASCII, and `"`, `\`, `%`, `;`, `*`, `=`,
+ * `'`, replaced by `_`. Neither part can break out of its parameter or inject a header, and the
+ * fallback can never look like another parameter (`filename*=UTF-8''…`) to a lenient parser.
  */
-export function contentDisposition(name: string): string {
-  const fallback = name.replace(/[^\x20-\x7e]|["\\%;]/g, '_')
+export function contentDisposition(name: string, type: 'attachment' | 'inline' = 'attachment'): string {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\%;*=']/g, '_')
   const encoded = [...Buffer.from(name, 'utf8')]
     .map((b) => {
       const c = String.fromCharCode(b)
       return ATTR_CHAR.test(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, '0')}`
     })
     .join('')
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`
+  return `${type}; filename="${fallback}"; filename*=UTF-8''${encoded}`
 }
 
 /**
- * Response headers for serving an attachment's bytes (owner and shared routes alike). Images are served
- * inline with their type and `nosniff`; every other kind (PDF, GPX, anything not a known image type)
- * is always a download named after `original_name`, sandboxed by its own CSP, so opening the file URL
- * directly can never render it on the app's origin.
+ * Response headers for serving an attachment's bytes (owner and shared routes alike); the file name
+ * a browser or the web client saves always comes from here, never from the note content. Images are
+ * served inline with their type and `nosniff`, named after `original_name` made to end in the detected
+ * type's extension (`IMAGE_EXTENSIONS`: `x.js` → `x.js.png`). Every other kind (PDF, GPX, anything not
+ * a known image type) is always a download named after `original_name`, sandboxed by its own CSP, so
+ * opening the file URL directly can never render it on the app's origin. A PDF or GPX download name
+ * always ends in `.pdf` / `.gpx` (`withExtension`; upload already stores it that way, this also covers
+ * older rows).
  */
 export function attachmentResponseHeaders(attachment: { mime: string; original_name: string }): Record<string, string> {
   const headers = { 'content-type': attachment.mime, 'x-content-type-options': 'nosniff' }
-  if (IMAGE_MIMES.has(attachment.mime)) return headers
+  const imageExtensions = IMAGE_EXTENSIONS.get(attachment.mime)
+  if (imageExtensions) {
+    return {
+      ...headers,
+      'content-disposition': contentDisposition(withOneOfExtensions(attachment.original_name, imageExtensions), 'inline'),
+    }
+  }
   return {
     ...headers,
-    'content-disposition': contentDisposition(attachment.original_name),
+    'content-disposition': contentDisposition(
+      withExtension(attachment.original_name, MIME_EXTENSIONS.get(attachment.mime) ?? ''),
+    ),
     'content-security-policy': 'sandbox',
   }
 }
@@ -134,10 +190,10 @@ const isXmlSpace = (c: string | undefined): boolean => c === ' ' || c === '\t' |
 
 /**
  * True when `buf` looks like a GPX document: UTF-8 text (an optional BOM is skipped) whose first
- * element, after an optional XML declaration, comments and whitespace, is literally `<gpx` (no
- * namespace prefix). Any `<!DOCTYPE` or `<!ENTITY` in the first `GPX_SNIFF_BYTES` rejects the file
- * (no DTDs, so no entity expansion if anything ever parses it). A scanner, not a regex, so the
- * check stays linear on hostile input.
+ * element, after whitespace, an optional XML declaration, comments and whitespace, is literally `<gpx`
+ * (no namespace prefix; no processing instruction other than the XML declaration). Any `<!DOCTYPE` or
+ * `<!ENTITY` in the first `GPX_SNIFF_BYTES` rejects the file (no DTDs, so no entity expansion if
+ * anything ever parses it). A scanner, not a regex, so the check stays linear on hostile input.
  */
 export function isGpx(buf: Buffer): boolean {
   let text: string
@@ -149,8 +205,10 @@ export function isGpx(buf: Buffer): boolean {
   }
   if (/<!(?:DOCTYPE|ENTITY)/i.test(text)) return false
   let i = 0
-  if (text.startsWith('<?xml', 0) && isXmlSpace(text[5])) {
-    const end = text.indexOf('?>', 5)
+  // leading whitespace before the declaration is ill-formed XML, but some exporters write it
+  while (isXmlSpace(text[i])) i++
+  if (text.startsWith('<?xml', i) && isXmlSpace(text[i + 5])) {
+    const end = text.indexOf('?>', i + 5)
     if (end < 0) return false
     i = end + 2
   }
@@ -167,7 +225,9 @@ export function isGpx(buf: Buffer): boolean {
 
 /**
  * Detects what an upload is from its content alone (never from the declared type or the extension):
- * an image by magic bytes, a PDF by a leading `%PDF-`, a GPX by `isGpx`. Returns null for anything else.
+ * an image by magic bytes, a PDF by `%PDF-` at offset 0 (readers also accept the header after some
+ * leading junk, but that would let a Windows/ELF/Mach-O executable whose stub carries `%PDF-` pass as
+ * a PDF), a GPX by `isGpx`. Returns null for anything else.
  */
 export function detectAttachmentKind(buf: Buffer): DetectedType | null {
   const image = detectImageMime(buf)
@@ -212,7 +272,8 @@ export function assertWithinQuota(db: Db, userId: string, quotaMb: number, incom
  * the bytes under a random `storage_name`, then checks the quota and inserts the row (with
  * `last_unlinked_at` NULL) in one synchronous step, so parallel uploads cannot together overshoot it.
  * If the quota check or the insert fails the file is removed again; a file left behind by a crash is a
- * stray the sweep removes. `quotaMb` is the per-account limit in MiB (0 = no limit).
+ * stray the sweep removes. `quotaMb` is the per-account limit in MiB (0 = no limit). Returns the new
+ * row plus the detected kind.
  */
 export async function storeUpload(
   db: Db,
@@ -220,7 +281,7 @@ export async function storeUpload(
   userId: string,
   input: UploadInput,
   quotaMb = 0,
-): Promise<AttachmentRow> {
+): Promise<AttachmentRow & { kind: AttachmentKind }> {
   const detected = detectAttachmentKind(input.data)
   if (!detected) throw unsupported()
   const { kind, mime } = detected
@@ -236,12 +297,13 @@ export async function storeUpload(
   await writeFile(file, input.data, { flag: 'wx' })
   try {
     assertWithinQuota(db, userId, quotaMb, input.data.length)
-    return createAttachment(db, userId, {
+    const row = createAttachment(db, userId, {
       originalName: displayName(input.originalName, kind),
       storageName,
       mime,
       size: input.data.length,
     })
+    return { ...row, kind }
   } catch (err) {
     await rm(file, { force: true })
     throw err
@@ -249,12 +311,14 @@ export async function storeUpload(
 }
 
 /**
- * Keeps the last path segment of a client file name, capped at 255 chars; falls back per kind to
- * "image", "document.pdf" or "track.gpx".
+ * Keeps the last path segment of a client file name, capped at `MAX_NAME_LENGTH` chars; falls back per
+ * kind to "image", "document.pdf" or "track.gpx". A PDF or GPX name is made to end in `.pdf` / `.gpx`
+ * (`withExtension`), so the stored name, the upload response, the editor node and every download agree
+ * and the saved file opens as the kind that was checked.
  */
 function displayName(name: string, kind: AttachmentKind): string {
   const base = name.split(/[\\/]/).pop()?.trim() ?? ''
-  return base.slice(0, 255) || KINDS[kind].fallbackName
+  return withExtension(base.slice(0, MAX_NAME_LENGTH) || KINDS[kind].fallbackName, KINDS[kind].extension)
 }
 
 const ATTACHMENT_REF = /^attachment:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i

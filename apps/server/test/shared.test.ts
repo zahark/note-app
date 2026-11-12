@@ -452,11 +452,24 @@ describe('shared attachments', () => {
     expect((await getSharedImage(noteId, aid, { token })).statusCode).toBe(200)
   })
 
-  it('serves a linked image inline: no Content-Disposition and no sandbox CSP', async () => {
+  it('serves a linked image inline under a server-derived name, and no sandbox CSP', async () => {
     const res = await getSharedImage(noteId, aid, { token: await unlock() })
     expect(res.statusCode).toBe(200)
-    expect(res.headers['content-disposition']).toBeUndefined()
+    expect(res.headers['content-disposition']).toBe(`inline; filename="cat.png"; filename*=UTF-8''cat.png`)
     expect(res.headers['content-security-policy']).toBeUndefined()
+  })
+
+  it('a file node pointing at an image named x.js still gets the image type and a .png name (PIN token and signed link)', async () => {
+    const img = await uploadFile(t.app, alice, { filename: 'x.js', contentType: 'application/javascript' })
+    await saveContent(noteId, docWithFiles({ aid: img, kind: 'gpx', name: 'x.js' }))
+    const viaToken = await getSharedImage(noteId, img, { token: await unlock() })
+    await stopSharing()
+    const viaLink = await getSharedImage(noteId, img, { query: linkQuery(await shareSigned()) })
+    for (const res of [viaToken, viaLink]) {
+      expect(res.statusCode).toBe(200)
+      expect(res.headers['content-type']).toBe('image/png')
+      expect(res.headers['content-disposition']).toBe(`inline; filename="x.js.png"; filename*=UTF-8''x.js.png`)
+    }
   })
 
   it.each([
@@ -464,7 +477,7 @@ describe('shared attachments', () => {
     ['a GPX', GPX, 'ridge.gpx', 'application/gpx+xml'],
   ])('serves %s as a sandboxed download with a PIN token or a signed link', async (_name, data, filename, mime) => {
     const fid = await uploadFile(t.app, alice, { data, filename })
-    await saveContent(noteId, docWithFiles(fid))
+    await saveContent(noteId, docWithFiles({ aid: fid, kind: mime === 'application/pdf' ? 'pdf' : 'gpx', name: filename }))
     const token = await unlock()
     const viaToken = await getSharedImage(noteId, fid, { token })
     await stopSharing()
@@ -480,10 +493,25 @@ describe('shared attachments', () => {
     }
   })
 
+  it.each([
+    ['a PDF', PDF, 'pdf', 'setup.exe.pdf'],
+    ['a GPX', GPX, 'gpx', 'setup.exe.gpx'],
+  ] as const)('serves %s uploaded as setup.exe as a download named %s (PIN token and signed link)', async (_name, data, kind, downloadName) => {
+    const fid = await uploadFile(t.app, alice, { data, filename: 'setup.exe', contentType: 'application/octet-stream' })
+    await saveContent(noteId, docWithFiles({ aid: fid, kind, name: downloadName }))
+    const viaToken = await getSharedImage(noteId, fid, { token: await unlock() })
+    await stopSharing()
+    const viaLink = await getSharedImage(noteId, fid, { query: linkQuery(await shareSigned()) })
+    for (const res of [viaToken, viaLink]) {
+      expect(res.statusCode).toBe(200)
+      expect(res.headers['content-disposition']).toBe(`attachment; filename="${downloadName}"; filename*=UTF-8''${downloadName}`)
+    }
+  })
+
   it('encodes a stored name with non-ASCII characters, quotes and semicolons safely', async () => {
     const fid = await uploadFile(t.app, alice, { data: PDF, filename: 'x.pdf' })
     t.db.prepare('UPDATE attachments SET original_name = ? WHERE id = ?').run('Ö"; x.pdf', fid)
-    await saveContent(noteId, docWithFiles(fid))
+    await saveContent(noteId, docWithFiles({ aid: fid, kind: 'pdf', name: 'x.pdf' }))
     const res = await getSharedImage(noteId, fid, { token: await unlock() })
     expect(res.statusCode).toBe(200)
     expect(res.headers['content-disposition']).toBe(`attachment; filename="___ x.pdf"; filename*=UTF-8''%C3%96%22%3B%20x.pdf`)
@@ -492,7 +520,7 @@ describe('shared attachments', () => {
   it('a credential for note A cannot fetch a PDF or GPX linked only to note B (identical unavailable)', async () => {
     const pdf = await uploadFile(t.app, alice, { data: PDF })
     const gpx = await uploadFile(t.app, alice, { data: GPX })
-    await newNote('B', docWithFiles(pdf, gpx))
+    await newNote('B', docWithFiles({ aid: pdf, kind: 'pdf' }, { aid: gpx, kind: 'gpx' }))
     const token = await unlock()
     const missing = await getSharedImage(noteId, randomUUID(), { token })
     expectUnavailable(missing)

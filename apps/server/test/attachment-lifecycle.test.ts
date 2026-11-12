@@ -179,8 +179,9 @@ describe('cross-note references', () => {
     const pdf = await uploadFile(t.app, alice, { data: PDF, contentType: 'application/pdf', filename: 'route.pdf' })
     const gpx = await uploadFile(t.app, alice, { data: GPX, contentType: '', filename: 'ridge.gpx' })
     const [a, b] = [await newNote(alice), await newNote(alice)]
-    await save(alice, a, docWithFiles(pdf, gpx))
-    await save(alice, b, docWithFiles(pdf, gpx))
+    const files = docWithFiles({ aid: pdf, kind: 'pdf', name: 'route.pdf' }, { aid: gpx, kind: 'gpx', name: 'ridge.gpx' })
+    await save(alice, a, files)
+    await save(alice, b, files)
     expect(links(b)).toEqual([pdf, gpx].sort())
     expect((await api(t.app, alice, 'DELETE', `/api/notes/${a}`)).statusCode).toBe(204)
     expect(await sweep(30 * DAY)).toEqual({ attachments: 0, strays: 0 })

@@ -94,19 +94,15 @@ export function upload(
   })
 }
 
-/** Uploads a PNG as `user` and returns the new attachment id. */
-export async function uploadPng(app: FastifyInstance, user: TestUser): Promise<string> {
-  const res = await upload(app, user)
-  if (res.statusCode !== 201) throw new Error(`upload failed: ${res.statusCode} ${res.body}`)
-  return (res.json() as { id: string }).id
-}
-
-/** Uploads `file` as `user` and returns the new attachment id. */
-export async function uploadFile(app: FastifyInstance, user: TestUser, file: UploadFile): Promise<string> {
+/** Uploads `file` (a PNG by default) as `user` and returns the new attachment id. */
+export async function uploadFile(app: FastifyInstance, user: TestUser, file: UploadFile = {}): Promise<string> {
   const res = await upload(app, user, file)
   if (res.statusCode !== 201) throw new Error(`upload failed: ${res.statusCode} ${res.body}`)
   return (res.json() as { id: string }).id
 }
+
+/** Uploads a PNG as `user` and returns the new attachment id. */
+export const uploadPng = (app: FastifyInstance, user: TestUser): Promise<string> => uploadFile(app, user)
 
 /** A TipTap document with a paragraph and one image node per attachment id. */
 export const docWithImages = (...aids: string[]) => ({
@@ -117,11 +113,22 @@ export const docWithImages = (...aids: string[]) => ({
   ],
 })
 
-/** A TipTap document with a paragraph and one file node (PDF/GPX) per attachment id. */
-export const docWithFiles = (...aids: string[]) => ({
+/** A file node's attachment, as the web editor stores it (`name` defaults per kind). */
+export interface FileRef {
+  aid: string
+  kind: 'pdf' | 'gpx'
+  name?: string
+  size?: number
+}
+
+/** A TipTap document with a paragraph and one file node (PDF/GPX) per attachment, in the web editor's shape. */
+export const docWithFiles = (...files: FileRef[]) => ({
   type: 'doc',
   content: [
     { type: 'paragraph', content: [{ type: 'text', text: 'files' }] },
-    ...aids.map((aid) => ({ type: 'attachmentFile', attrs: { src: `attachment://${aid}`, name: 'file', size: 1, kind: 'pdf' } })),
+    ...files.map(({ aid, kind, name = kind === 'pdf' ? 'route.pdf' : 'ridge.gpx', size = 1024 }) => ({
+      type: 'attachmentFile',
+      attrs: { src: `attachment://${aid}`, name, size, kind },
+    })),
   ],
 })

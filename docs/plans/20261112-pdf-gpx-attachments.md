@@ -38,6 +38,8 @@
   - GPX: UTF-8 text (optional BOM) whose first element, after an optional XML declaration, comments and whitespace, is `<gpx` (any namespace prefix not allowed; root must be literally `gpx`); reject any `<!DOCTYPE` or `<!ENTITY` anywhere in the first 64 KB; stored mime `application/gpx+xml`; limit 25 MB.
   - Everything else is still 415 `UNSUPPORTED_MEDIA_TYPE`. The quota and upload rate limit apply to all kinds.
 - **Non-image files are always served as downloads** on both the owner route and the shared route: `Content-Disposition: attachment; filename*=UTF-8''<encoded original_name>` (with a safe ASCII `filename=` fallback), `X-Content-Type-Options: nosniff`, and `Content-Security-Policy: sandbox` on the file response itself, so opening a file URL directly can never render it on the app's origin. Images keep today's headers.
+  - ➕ (review) images get `Content-Disposition: inline` with a server-derived name ending in the detected image extension, and the web client saves only a response typed PDF/GPX under the server's name (never the node's `name`; otherwise an error toast), so a file node pointing at an image named `x.js` cannot be saved as `x.js`.
+  - ➕ (review) a PDF/GPX name is forced to end in `.pdf` / `.gpx` (appended when missing, `setup.exe` → `setup.exe.pdf`) at upload and in `Content-Disposition`, so a saved download always opens as the checked kind; the `%PDF-` header must be at offset 0 (an executable whose stub carries `%PDF-` is 415).
 - **Editor**: a new `AttachmentFile` TipTap block node (atom) with attrs `src` (`attachment://<aid>`), `name`, `size`, `kind` (`pdf` | `gpx`). It uses the same resolver idea as images and the same clipboard rules (`data-attachment-id`, only `attachment://` references survive a paste). `name`/`size`/`kind` are display-only text, rendered as text nodes (never HTML).
   - `kind: 'gpx'`: chip with icon, name, human-readable size, Download button.
   - `kind: 'pdf'`: the same chip plus a small viewer: fixed max height (about 480 px), fit-to-width canvas for the current page, previous/next buttons, "page i of n", loading and "Preview unavailable, download instead" states.
@@ -106,6 +108,7 @@
 - [x] verify `npm run build -w apps/web` keeps PDF.js out of the main chunk (separate lazy chunk) and record chunk sizes in the plan
   - main `index-*.js`: 1,034.50 kB (327.67 kB gzip) before → 1,039.75 kB (329.57 kB gzip) after (+5 kB: viewer + loader only)
   - lazy `pdf-*.js` (PDF.js): 430.16 kB (129.27 kB gzip); worker asset `pdf.worker.min-*.mjs`: 1,264.34 kB, same origin, loaded only when a PDF is shown
+  - after switching to the legacy build (user decision during review, for older iOS/Android browsers): main `index-*.js` unchanged at 1,042.69 kB (330.67 kB gzip, same with the modern build at that point); lazy `pdf-*.js`: 430.16 kB (129.27 kB gzip) → 487.47 kB (148.09 kB gzip); worker `pdf.worker.min-*.mjs`: 1,264.34 kB → 1,321.30 kB
 - [x] run tests — must pass before task 5
 
 ### Task 5: Upload entry points and routing
@@ -168,3 +171,6 @@
 - open a real route-guide PDF (multi-page, images, embedded fonts) in Chrome, Safari and on a phone
 - download a GPX exported from a real app and import it back into that app
 - check the PDF viewer on a slow connection (loading state) and with a corrupted PDF (error state)
+- on a real iPhone: the "Attach file" picker offers `.gpx` files (the input accepts `application/gpx+xml` as well as `.gpx`; if GPX files are still greyed out, drop the GPX part of the `accept` filter, since client and server re-check the kind)
+- on the phones and browsers you actually use, including an older iPhone/Android: the PDF viewer renders (the PDF.js legacy build targets older browsers; one that still fails shows "Preview unavailable", see README "Browser support")
+- a PDF with non-embedded standard fonts and one with CJK text render their text (standard-font data and CMaps are served from `/pdfjs/`); a JPEG 2000 / JBIG2 scan is expected to show blank images

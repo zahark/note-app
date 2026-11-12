@@ -1,9 +1,11 @@
 import type { QueryClient } from '@tanstack/react-query'
 import type { JSONContent } from '@tiptap/core'
-import type { AttachmentResolver } from '@/features/editor/AttachmentImage'
+import { ACCEPTED_IMAGE_TYPES } from '@/features/editor/api'
+import type { AttachmentResolver } from '@/features/editor/attachmentRef'
 import { treeQueryKey, type TreeData, type TreeNote } from '@/features/tree/api'
 import { patchNote } from '@/features/tree/mutations'
 import { api, apiFetch, ApiError } from '@/lib/api'
+import { clickDownload, DownloadRefusedError, fileDownloadName } from '@/lib/download'
 
 // ---- owner side: enable, regenerate and stop sharing ----
 
@@ -118,60 +120,55 @@ export async function fetchSharedNote(noteId: string, credential: SharedCredenti
 const sharedAttachmentRequest = (noteId: string, aid: string, credential: SharedCredential) =>
   withCredential(`${sharedApiPath(noteId)}/attachments/${encodeURIComponent(aid)}`, credential)
 
-/**
- * The file name from a `Content-Disposition` header: the RFC 5987 `filename*=UTF-8''…` form the server
- * sends, else the plain `filename="…"`; null when there is none (images) or it cannot be decoded.
- */
-export function fileNameFromDisposition(header: string | null): string | null {
-  if (!header) return null
-  const extended = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header)
-  if (extended) {
-    try {
-      const name = decodeURIComponent(extended[1]!.trim())
-      if (name) return name
-    } catch {
-      // malformed encoding: fall back to the plain form
-    }
-  }
-  const plain = /filename\s*=\s*"([^"]*)"/i.exec(header)
-  return plain?.[1] ? plain[1] : null
-}
-
 export interface SharedAttachmentResolver {
   resolve: AttachmentResolver
   /**
    * Saves file attachment `aid`: fetched with the credential (as for `resolve`, sharing its cache),
-   * then a blob-URL download named after the server's stored name, else `name`. Rejects when the
-   * file cannot be fetched; the caller reports it.
+   * then a blob-URL download named after the server's stored name (`fileDownloadName`). Rejects when
+   * the file cannot be fetched, and with a `DownloadRefusedError` when the response is not a PDF or GPX
+   * named as one (a file node pointing at an image); the caller reports it.
    */
-  download: (aid: string, name: string) => Promise<void>
-  /** Revokes every blob URL handed out so far. */
+  download: (aid: string) => Promise<void>
+  /** (Re)opens the resolver after a `dispose`: the component mounted again (React StrictMode remounts once). */
+  activate: () => void
+  /**
+   * Revokes every blob URL handed out so far and forgets them; a fetch still running then gets no
+   * blob URL at all. `activate` undoes it.
+   */
   dispose: () => void
 }
 
 interface LoadedAttachment {
   blobUrl: string
-  /** The server's stored file name (`Content-Disposition`), for file kinds; null for images. */
+  /** The server's stored file name for a PDF or GPX (`fileDownloadName`); null for anything else, which is never saved. */
   fileName: string | null
 }
+
+const IMAGE_TYPES: ReadonlySet<string> = new Set(ACCEPTED_IMAGE_TYPES)
 
 /**
  * Resolves `attachment://<aid>` images and files of a shared note to blob URLs: each attachment is
  * fetched once from `/api/shared/:id/attachments/:aid` with the credential (token in a header, never
- * in a URL). The PDF viewer reads its bytes from that blob URL, and a download saves it.
+ * in a URL). The PDF viewer reads its bytes from that blob URL, and a download saves it. A blob URL
+ * has the app's origin and loses the file response's download and sandbox headers, so anything but an
+ * image gets the type `application/octet-stream`: opened directly, it can never render on the app.
  */
 export function createSharedAttachmentResolver(noteId: string, credential: SharedCredential): SharedAttachmentResolver {
   const cache = new Map<string, Promise<LoadedAttachment>>()
   const blobUrls = new Set<string>()
+  // after dispose (the component unmounted), a fetch still running must not create (and leak) a blob URL
+  let disposed = false
 
   const load = async (aid: string): Promise<LoadedAttachment> => {
     const { url, headers } = sharedAttachmentRequest(noteId, aid, credential)
     const res = await fetch(url, { headers, credentials: 'omit' })
     if (!res.ok) throw new ApiError(res.status, 'UNAVAILABLE', 'Attachment unavailable')
     const blob = await res.blob()
-    const blobUrl = URL.createObjectURL(blob)
+    if (disposed) throw new DOMException('Attachment no longer needed', 'AbortError')
+    const typed = IMAGE_TYPES.has(blob.type) ? blob : new Blob([blob], { type: 'application/octet-stream' })
+    const blobUrl = URL.createObjectURL(typed)
     blobUrls.add(blobUrl)
-    return { blobUrl, fileName: fileNameFromDisposition(res.headers.get('content-disposition')) }
+    return { blobUrl, fileName: fileDownloadName(res.headers) }
   }
 
   const get = (aid: string): Promise<LoadedAttachment> => {
@@ -190,18 +187,18 @@ export function createSharedAttachmentResolver(noteId: string, credential: Share
 
   return {
     resolve: async (aid) => (await get(aid)).blobUrl,
-    download: async (aid, name) => {
+    download: async (aid) => {
       const { blobUrl, fileName } = await get(aid)
+      // never the node's name: only a PDF/GPX the server named as one is saved
+      if (!fileName) throw new DownloadRefusedError()
       // the blob URL stays cached (and is revoked on dispose), so the browser can finish saving it
-      const anchor = document.createElement('a')
-      anchor.href = blobUrl
-      anchor.download = fileName ?? name
-      anchor.hidden = true
-      document.body.append(anchor)
-      anchor.click()
-      anchor.remove()
+      clickDownload(blobUrl, fileName)
+    },
+    activate: () => {
+      disposed = false
     },
     dispose: () => {
+      disposed = true
       for (const blobUrl of blobUrls) URL.revokeObjectURL(blobUrl)
       blobUrls.clear()
       cache.clear()

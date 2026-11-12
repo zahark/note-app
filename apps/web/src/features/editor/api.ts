@@ -1,8 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 import type { JSONContent } from '@tiptap/core'
 import type { TreeNote } from '@/features/tree/api'
-import { api } from '@/lib/api'
-import type { FileKind } from './AttachmentFile'
+import { api, apiFetchResponse } from '@/lib/api'
+import { DownloadRefusedError, fileDownloadName, saveBlob } from '@/lib/download'
+import { FILE_KINDS, FILE_TYPES, type FileKind } from '@/lib/fileTypes'
+import { MIB } from '@/lib/units'
 
 /** A note with its content, as returned by `GET /api/notes/:id`. */
 export interface Note extends TreeNote {
@@ -124,9 +126,15 @@ export function saveNoteContent(noteId: string, content: JSONContent, version: n
 
 /** Image types the server accepts (checked again there by magic bytes). */
 export const ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
-/** File extensions of the non-image attachments the server accepts (checked again there by content). */
-export const ACCEPTED_FILE_EXTENSIONS = ['.pdf', '.gpx'] as const
-const MIB = 1024 * 1024
+/**
+ * The "Attach file" input's `accept` list: the non-image kinds by MIME type and by extension (iOS maps
+ * extensions to system types and has none for `.gpx`, so the MIME type keeps GPX files pickable there).
+ * The server checks the content again.
+ */
+export const ACCEPTED_FILE_TYPES: readonly string[] = [
+  ...FILE_KINDS.map((kind) => FILE_TYPES[kind].mime),
+  ...FILE_KINDS.map((kind) => FILE_TYPES[kind].extension),
+]
 /** Largest image the server accepts (`MAX_IMAGE_BYTES` on the server). */
 export const MAX_IMAGE_BYTES = 10 * MIB
 /** Largest PDF or GPX file the server accepts (`MAX_FILE_BYTES` on the server). */
@@ -150,61 +158,59 @@ function extensionOf(name: string): string {
 /**
  * What kind of attachment `file` looks like, from its type and then its extension (browsers often
  * report a GPX file as `''` or `application/octet-stream`), or null if it is none we accept. Only a
- * routing hint: the server detects the kind from the content.
+ * guess for the checks before uploading: the node is built from the kind the server detected.
  */
 export function uploadKindOf(file: File): UploadKind | null {
   if ((ACCEPTED_IMAGE_TYPES as readonly string[]).includes(file.type)) return 'image'
   const extension = extensionOf(file.name)
-  if (file.type === 'application/pdf' || extension === '.pdf') return 'pdf'
-  if (file.type === 'application/gpx+xml' || extension === '.gpx') return 'gpx'
+  return FILE_KINDS.find((kind) => file.type === FILE_TYPES[kind].mime || extension === FILE_TYPES[kind].extension) ?? null
+}
+
+/**
+ * Checks a file before uploading it: an accepted kind (image, PDF, GPX) within that kind's size limit.
+ * Returns why it cannot be uploaded, or null when it can.
+ */
+export function checkUploadFile(file: File): string | null {
+  const kind = uploadKindOf(file)
+  if (!kind) {
+    if (file.type.startsWith('image/')) return `${file.name || 'This file'} is not a PNG, JPEG, WebP or GIF image`
+    return `${file.name || 'This file'} is not a supported file: attach PNG, JPEG, WebP or GIF images, PDF or GPX files`
+  }
+  const { maxBytes, noun } = UPLOAD_LIMITS[kind]
+  if (file.size > maxBytes) return `${file.name || noun} is larger than ${maxBytes / MIB} MB`
   return null
 }
 
-/** The kind of node an upload becomes, or why the file cannot be uploaded. */
-export type UploadCheck = { kind: UploadKind; problem?: undefined } | { kind?: undefined; problem: string }
-
-/** Checks a file before uploading it: an accepted kind (image, PDF, GPX) within that kind's size limit. */
-export function checkUploadFile(file: File): UploadCheck {
-  const kind = uploadKindOf(file)
-  if (!kind) {
-    if (file.type.startsWith('image/')) return { problem: `${file.name || 'This file'} is not a PNG, JPEG, WebP or GIF image` }
-    return {
-      problem: `${file.name || 'This file'} is not a supported file: attach PNG, JPEG, WebP or GIF images, PDF or GPX files`,
-    }
-  }
-  const { maxBytes, noun } = UPLOAD_LIMITS[kind]
-  if (file.size > maxBytes) return { problem: `${file.name || noun} is larger than ${maxBytes / MIB} MB` }
-  return { kind }
+/** A stored upload, as `POST /api/attachments` returns it: `kind` is detected from the content. */
+export interface UploadedAttachment {
+  id: string
+  kind: UploadKind
+  mime: string
+  size: number
+  /** The stored file name: the server's per-kind fallback when the file had none; a PDF or GPX name always ends in `.pdf` / `.gpx`. */
+  name: string
 }
 
-/** `POST /api/attachments`: uploads one file (image, PDF or GPX) and returns its attachment id. */
-export async function uploadAttachment(file: File): Promise<string> {
+/** `POST /api/attachments`: uploads one file (image, PDF or GPX). */
+export function uploadAttachment(file: File): Promise<UploadedAttachment> {
   const form = new FormData()
   form.append('file', file, file.name)
-  const { id } = await api.post<{ id: string }>('/api/attachments', form)
-  return id
+  return api.post<UploadedAttachment>('/api/attachments', form)
 }
 
 /** The owner's URL for an attachment; used only inside the node views and downloads, never stored. */
 export const ownerAttachmentUrl = (aid: string) => `/api/attachments/${encodeURIComponent(aid)}`
 
 /**
- * The owner's file download: a temporary anchor to `/api/attachments/:aid` (the server's
- * `Content-Disposition` names the file). The `download` attribute keeps the app on the page even if
- * the response is an error rather than the file.
+ * The owner's file download: fetches `/api/attachments/:aid` with the session cookie and saves the
+ * bytes under the server's stored name (`fileDownloadName`). Rejects with an `ApiError` on a network
+ * error or an error status (expired session, deleted file), so the caller can report it instead of the
+ * browser saving an error body under the file's name, and with a `DownloadRefusedError` when the
+ * response is not a PDF or GPX named as one (a file node pointing at an image).
  */
-export function downloadOwnerAttachment(aid: string, name: string): void {
-  const anchor = document.createElement('a')
-  anchor.href = ownerAttachmentUrl(aid)
-  anchor.download = name
-  anchor.hidden = true
-  document.body.append(anchor)
-  anchor.click()
-  anchor.remove()
-}
-
-/** The files in a paste or drop, to be uploaded (unsupported ones get a message instead). */
-export function uploadFilesFrom(data: DataTransfer | null | undefined): File[] {
-  if (!data?.files) return []
-  return Array.from(data.files)
+export async function downloadOwnerAttachment(aid: string): Promise<void> {
+  const res = await apiFetchResponse(ownerAttachmentUrl(aid))
+  const name = fileDownloadName(res.headers)
+  if (!name) throw new DownloadRefusedError()
+  saveBlob(await res.blob(), name)
 }

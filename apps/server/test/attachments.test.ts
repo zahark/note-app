@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  attachmentResponseHeaders,
   contentDisposition,
   detectAttachmentKind,
   detectImageMime,
@@ -13,6 +14,7 @@ import {
   MAX_IMAGE_BYTES,
   UPLOAD_LIMIT,
   uploadsDir,
+  withExtension,
 } from '../src/services/attachments.js'
 import { closeApp, errorCode, makeApp, ORIGIN, type TestApp } from './helpers/auth.js'
 import {
@@ -40,6 +42,8 @@ const KML = Buffer.from('<?xml version="1.0"?><kml xmlns="http://www.opengis.net
 const HTML = Buffer.from('<!doctype html><html><body><script>alert(1)</script></body></html>')
 const DOCTYPE_GPX = Buffer.from(`<?xml version="1.0"?>\n<!DOCTYPE gpx [<!ENTITY x "boom">]>\n${GPX_BODY}`)
 const ENTITY_GPX = Buffer.from(`${GPX_BODY}<!-- <!ENTITY x "boom"> -->`)
+/** A Windows executable (`MZ` at offset 0) whose DOS stub carries a PDF header well inside the first KiB. */
+const MZ_PDF = Buffer.concat([Buffer.from('MZ\x90\x00\x03\x00\x00\x00', 'latin1'), Buffer.alloc(56), PDF, Buffer.alloc(512)])
 
 /** `head` padded to exactly `bytes` with `fill`, for size-limit tests that still pass type detection. */
 const padTo = (head: Buffer, bytes: number, fill = 0) => Buffer.concat([head, Buffer.alloc(bytes - head.length, fill)])
@@ -102,6 +106,12 @@ describe('detectAttachmentKind', () => {
     ],
     ['self-closing empty GPX', Buffer.from('<gpx/>'), { kind: 'gpx', mime: 'application/gpx+xml' }],
     ['GPX with non-ASCII text', Buffer.from(`<gpx><name>Перевал Ö</name></gpx>`), { kind: 'gpx', mime: 'application/gpx+xml' }],
+    [
+      'GPX with whitespace before the XML declaration',
+      Buffer.concat([BOM, Buffer.from(`\r\n  ${GPX.toString()}`)]),
+      { kind: 'gpx', mime: 'application/gpx+xml' },
+    ],
+    ['GPX mentioning %PDF- in its first bytes', Buffer.from(`<gpx><name>%PDF-1.7</name></gpx>`), { kind: 'gpx', mime: 'application/gpx+xml' }],
   ])('recognises %s', (_name, bytes, expected) => {
     expect(detectAttachmentKind(bytes)).toEqual(expected)
   })
@@ -122,7 +132,10 @@ describe('detectAttachmentKind', () => {
     ['an unterminated comment', Buffer.from(`<!-- ${GPX_BODY}`)],
     ['invalid UTF-8', Buffer.concat([Buffer.from('<gpx><name>'), Buffer.from([0xc3, 0x28]), Buffer.from('</name></gpx>')])],
     ['UTF-16 GPX', Buffer.from(`\ufeff${GPX_BODY}`, 'utf16le')],
-    ['PDF signature not at the start', Buffer.concat([Buffer.from(' '), PDF])],
+    ['a PDF signature after leading junk', Buffer.concat([Buffer.from('\r\n junk \x00'), PDF])],
+    ['a PDF signature after one leading space', Buffer.concat([Buffer.from(' '), PDF])],
+    ['an MZ executable carrying %PDF- in its DOS stub', MZ_PDF],
+    ['an XML declaration after text', Buffer.from(`x <?xml version="1.0"?>${GPX_BODY}`)],
     ['random bytes', Buffer.from([0x00, 0x13, 0x37, 0xde, 0xad, 0xbe, 0xef, 0x42])],
     ['empty', Buffer.alloc(0)],
   ])('rejects %s', (_name, bytes) => {
@@ -174,11 +187,11 @@ describe('extractAttachmentIds', () => {
 })
 
 describe('POST /api/attachments', () => {
-  it('stores a valid image and returns {id} (a UUID); the file name on disk is random', async () => {
+  it('stores a valid image and returns {id, kind, mime, size, name} (id a UUID); the file name on disk is random', async () => {
     const res = await upload(t.app, alice, { filename: '../../etc/passwd.png' })
     expect(res.statusCode).toBe(201)
     const { id } = res.json() as { id: string }
-    expect(Object.keys(res.json())).toEqual(['id'])
+    expect(res.json()).toEqual({ id, kind: 'image', mime: 'image/png', size: PNG.length, name: 'passwd.png' })
     expect(id).toMatch(UUID_V4)
 
     const row = t.db.prepare('SELECT * FROM attachments WHERE id = ?').get(id) as Record<string, unknown>
@@ -290,6 +303,47 @@ describe('POST /api/attachments', () => {
     expect(res.statusCode).toBe(201)
     const { id } = res.json() as { id: string }
     expect(t.db.prepare('SELECT mime FROM attachments WHERE id = ?').pluck().get(id)).toBe(detected)
+    // the response carries the detected kind, so the client builds the right node
+    expect(res.json()).toMatchObject({ mime: detected, kind: detected === 'application/pdf' ? 'pdf' : 'gpx' })
+  })
+
+  it('reports a PDF named .png and declared as PNG as a pdf', async () => {
+    const res = await upload(t.app, alice, { data: PDF, contentType: 'image/png', filename: 'scan.png' })
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toMatchObject({ kind: 'pdf', mime: 'application/pdf', size: PDF.length, name: 'scan.png.pdf' })
+  })
+
+  it('detects the kind before the size: an 11 MiB unsupported file is 415, not 413, and nothing is stored', async () => {
+    const data = Buffer.alloc(11 * 1024 * 1024, 0x13)
+    const res = await upload(t.app, alice, { data, contentType: 'image/png', filename: 'big.png' })
+    expect(res.statusCode).toBe(415)
+    expect(res.json()).toMatchObject({ error: { code: 'UNSUPPORTED_MEDIA_TYPE' } })
+    expect(attachmentRows()).toBe(0)
+    expect(uploadedFiles()).toEqual([])
+  })
+
+  it.each([
+    ['a PDF named .exe', PDF, 'setup.exe', 'setup.exe.pdf'],
+    ['a PDF named .html', PDF, 'Route guide.html', 'Route guide.html.pdf'],
+    ['a PDF with no extension', PDF, 'scan', 'scan.pdf'],
+    ['a PDF named .PDF', PDF, 'ROUTE.PDF', 'ROUTE.PDF'],
+    ['a GPX named .exe', GPX, 'setup.exe', 'setup.exe.gpx'],
+    ['a GPX named .xml', GPX, 'ridge.xml', 'ridge.xml.gpx'],
+    ['a GPX named .Gpx', GPX, 'Ridge.Gpx', 'Ridge.Gpx'],
+    ['a PNG named .exe (images keep their name)', PNG, 'photo.exe', 'photo.exe'],
+  ])('stores %s under a name ending in the detected kind', async (_name, data, filename, stored) => {
+    const res = await upload(t.app, alice, { data, filename, contentType: 'application/octet-stream' })
+    expect(res.statusCode).toBe(201)
+    const { id, name } = res.json() as { id: string; name: string }
+    expect(name).toBe(stored)
+    expect(t.db.prepare('SELECT original_name FROM attachments WHERE id = ?').pluck().get(id)).toBe(stored)
+  })
+
+  it('caps a long PDF name at 255 characters and keeps the .pdf extension', async () => {
+    const res = await upload(t.app, alice, { data: PDF, filename: `${'a'.repeat(300)}.exe` })
+    expect(res.statusCode).toBe(201)
+    const { name } = res.json() as { name: string }
+    expect(name).toBe(`${'a'.repeat(251)}.pdf`)
   })
 
   it.each([
@@ -313,6 +367,8 @@ describe('POST /api/attachments', () => {
     ['a GPX with an ENTITY', { data: ENTITY_GPX, contentType: 'application/gpx+xml', filename: 'x.gpx' }],
     ['HTML named .pdf', { data: HTML, contentType: 'application/pdf', filename: 'x.pdf' }],
     ['random bytes named .pdf', { data: Buffer.from([0x13, 0x37, 0, 1, 2, 3]), contentType: 'application/pdf', filename: 'x.pdf' }],
+    ['an MZ executable with %PDF- in its first KiB', { data: MZ_PDF, contentType: 'application/pdf', filename: 'setup.pdf' }],
+    ['an MZ executable with %PDF- in its first KiB, named .exe', { data: MZ_PDF, contentType: 'application/octet-stream', filename: 'setup.exe' }],
   ])('rejects %s with 415 and stores nothing', async (_name, file) => {
     const res = await upload(t.app, alice, file)
     expect(res.statusCode).toBe(415)
@@ -513,7 +569,12 @@ describe('contentDisposition', () => {
     [
       'quotes, semicolons, backslashes and percent signs',
       `a"b;c\\d%e'(f)*.pdf`,
-      `attachment; filename="a_b_c_d_e'(f)*.pdf"; filename*=UTF-8''a%22b%3Bc%5Cd%25e%27%28f%29%2A.pdf`,
+      `attachment; filename="a_b_c_d_e_(f)_.pdf"; filename*=UTF-8''a%22b%3Bc%5Cd%25e%27%28f%29%2A.pdf`,
+    ],
+    [
+      'a name crafted to look like a filename* parameter',
+      `a filename*=UTF-8''x.exe.pdf`,
+      `attachment; filename="a filename__UTF-8__x.exe.pdf"; filename*=UTF-8''a%20filename%2A%3DUTF-8%27%27x.exe.pdf`,
     ],
     ['control characters (no header injection)', 'a\r\nX-Evil: 1.pdf', `attachment; filename="a__X-Evil: 1.pdf"; filename*=UTF-8''a%0D%0AX-Evil%3A%201.pdf`],
   ])('encodes %s', (_name, input, expected) => {
@@ -522,6 +583,72 @@ describe('contentDisposition', () => {
 
   it('never leaves a lone surrogate unencoded', () => {
     expect(contentDisposition('a\ud800.pdf')).toBe(`attachment; filename="a_.pdf"; filename*=UTF-8''a%EF%BF%BD.pdf`)
+  })
+
+  it('builds an inline disposition on request', () => {
+    expect(contentDisposition('cat.png', 'inline')).toBe(`inline; filename="cat.png"; filename*=UTF-8''cat.png`)
+  })
+})
+
+describe('attachmentResponseHeaders', () => {
+  // an image is served inline, but still under a server-derived name ending in its detected type's extension
+  it.each([
+    ['image/png', 'x.js', 'x.js.png'],
+    ['image/png', 'cat.PNG', 'cat.PNG'],
+    ['image/jpeg', 'x', 'x.jpg'],
+    ['image/jpeg', 'photo.jpeg', 'photo.jpeg'],
+    ['image/jpeg', 'photo.JPG', 'photo.JPG'],
+    ['image/jpeg', 'photo.png', 'photo.png.jpg'],
+    ['image/webp', 'x.html', 'x.html.webp'],
+    ['image/gif', 'invoice.js', 'invoice.js.gif'],
+  ])('serves %s stored as %j inline, named %j', (mime, original_name, name) => {
+    expect(attachmentResponseHeaders({ mime, original_name })).toEqual({
+      'content-type': mime,
+      'x-content-type-options': 'nosniff',
+      'content-disposition': `inline; filename="${name}"; filename*=UTF-8''${name}`,
+    })
+  })
+
+  // default-deny: only the image allowlist is inline, whatever else a row's mime may say
+  it.each([
+    ['application/pdf', 'x.bin.pdf'],
+    ['application/gpx+xml', 'x.bin.gpx'],
+    ['text/html', 'x.bin'],
+    ['image/svg+xml', 'x.bin'],
+    ['application/xml', 'x.bin'],
+    ['', 'x.bin'],
+  ])('serves %j as a sandboxed download named %s', (mime, downloadName) => {
+    expect(attachmentResponseHeaders({ mime, original_name: 'x.bin' })).toEqual({
+      'content-type': mime,
+      'x-content-type-options': 'nosniff',
+      'content-disposition': `attachment; filename="${downloadName}"; filename*=UTF-8''${downloadName}`,
+      'content-security-policy': 'sandbox',
+    })
+  })
+
+  it('keeps a PDF or GPX name that already ends in its extension', () => {
+    expect(attachmentResponseHeaders({ mime: 'application/pdf', original_name: 'a.PDF' })['content-disposition']).toBe(
+      `attachment; filename="a.PDF"; filename*=UTF-8''a.PDF`,
+    )
+    expect(attachmentResponseHeaders({ mime: 'application/gpx+xml', original_name: 'b.gpx' })['content-disposition']).toBe(
+      `attachment; filename="b.gpx"; filename*=UTF-8''b.gpx`,
+    )
+  })
+})
+
+describe('withExtension', () => {
+  it.each([
+    ['setup.exe', '.pdf', 'setup.exe.pdf'],
+    ['route.pdf', '.pdf', 'route.pdf'],
+    ['ROUTE.PDF', '.pdf', 'ROUTE.PDF'],
+    ['track', '.gpx', 'track.gpx'],
+    ['track.gpx.exe', '.gpx', 'track.gpx.exe.gpx'],
+    ['photo.exe', '', 'photo.exe'],
+    ['a'.repeat(255), '.pdf', `${'a'.repeat(251)}.pdf`],
+  ])('%j + %j → %j', (name, extension, expected) => {
+    expect(withExtension(name, extension)).toBe(expected)
+    // idempotent: forcing again changes nothing
+    expect(withExtension(expected, extension)).toBe(expected)
   })
 })
 
@@ -557,11 +684,16 @@ describe('GET /api/attachments/:aid', () => {
     expect((await api(t.app, alice, 'GET', `/api/attachments/${aid}`)).statusCode).toBe(404)
   })
 
-  it('serves an image inline: no Content-Disposition and no sandbox CSP', async () => {
+  it('serves an image inline under its stored name with the detected extension forced, and no sandbox CSP', async () => {
     const aid = await uploadPng(t.app, alice)
     const res = await api(t.app, alice, 'GET', `/api/attachments/${aid}`)
-    expect(res.headers['content-disposition']).toBeUndefined()
+    expect(res.headers['content-disposition']).toBe(`inline; filename="cat.png"; filename*=UTF-8''cat.png`)
     expect(res.headers['content-security-policy']).toBeUndefined()
+
+    const renamed = await uploadFile(t.app, alice, { filename: 'invoice.js', contentType: 'application/javascript' })
+    const js = await api(t.app, alice, 'GET', `/api/attachments/${renamed}`)
+    expect(js.headers['content-type']).toBe('image/png')
+    expect(js.headers['content-disposition']).toBe(`inline; filename="invoice.js.png"; filename*=UTF-8''invoice.js.png`)
   })
 
   it.each([
@@ -581,13 +713,34 @@ describe('GET /api/attachments/:aid', () => {
 
   it.each([
     ['a non-ASCII name', 'Перевал.gpx', `attachment; filename="_______.gpx"; filename*=UTF-8''%D0%9F%D0%B5%D1%80%D0%B5%D0%B2%D0%B0%D0%BB.gpx`],
-    ['quotes and semicolons', 'a"; filename="evil.html', `attachment; filename="a__ filename=_evil.html"; filename*=UTF-8''a%22%3B%20filename%3D%22evil.html`],
+    [
+      'quotes and semicolons',
+      'a"; filename="evil.html',
+      `attachment; filename="a__ filename__evil.html.gpx"; filename*=UTF-8''a%22%3B%20filename%3D%22evil.html.gpx`,
+    ],
   ])('encodes a stored name with %s safely', async (_name, stored, expected) => {
     const aid = await uploadFile(t.app, alice, { data: GPX, filename: 'x.gpx' })
     t.db.prepare('UPDATE attachments SET original_name = ? WHERE id = ?').run(stored, aid)
     const res = await api(t.app, alice, 'GET', `/api/attachments/${aid}`)
     expect(res.statusCode).toBe(200)
     expect(res.headers['content-disposition']).toBe(expected)
+  })
+
+  it.each([
+    ['a PDF', PDF, 'setup.exe.pdf'],
+    ['a GPX', GPX, 'setup.exe.gpx'],
+  ])('serves %s uploaded as setup.exe as a download named %s', async (_name, data, downloadName) => {
+    const aid = await uploadFile(t.app, alice, { data, filename: 'setup.exe', contentType: 'application/octet-stream' })
+    const res = await api(t.app, alice, 'GET', `/api/attachments/${aid}`)
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-disposition']).toBe(`attachment; filename="${downloadName}"; filename*=UTF-8''${downloadName}`)
+  })
+
+  it('forces the extension on a stored PDF row whose name lacks it (rows stored before the rule)', async () => {
+    const aid = await uploadFile(t.app, alice, { data: PDF, filename: 'x.pdf' })
+    t.db.prepare('UPDATE attachments SET original_name = ? WHERE id = ?').run('setup.exe', aid)
+    const res = await api(t.app, alice, 'GET', `/api/attachments/${aid}`)
+    expect(res.headers['content-disposition']).toBe(`attachment; filename="setup.exe.pdf"; filename*=UTF-8''setup.exe.pdf`)
   })
 
   it("user B fetching user A's PDF or GPX → 404, same as a missing id", async () => {

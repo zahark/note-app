@@ -221,11 +221,18 @@ test('notes smoke path: organize, write, upload images and files, share by PIN, 
     await expectPdfViewerWorks(content)
     await expectGpxDownload(page, content)
 
-    // the stored content keeps only references, and both files are linked to the note
+    // the stored content keeps only references (the image and both files), never a resolved URL
     const saved = JSON.stringify((await (await page.request.get(`/api/notes/${noteAId}`)).json()).note.content)
     expect(saved.match(/attachment:\/\/[0-9a-f-]{36}/g)).toHaveLength(3)
     expect(saved).not.toContain('/api/attachments/')
     expect(cspViolations).toEqual([])
+
+    // PDF.js's standard-font data and CMaps are served same-origin from the build
+    for (const asset of ['/pdfjs/standard_fonts/FoxitSerif.pfb', '/pdfjs/cmaps/78-H.bcmap']) {
+      const res = await page.request.get(asset)
+      expect(res.status(), asset).toBe(200)
+      expect((await res.body()).length, asset).toBeGreaterThan(0)
+    }
   })
 
   await test.step('share note A by PIN', async () => {
@@ -250,7 +257,10 @@ test('notes smoke path: organize, write, upload images and files, share by PIN, 
       await shared.goto(pinLink)
       await expect(shared.getByRole('heading', { name: 'This note is protected' })).toBeVisible()
       await shared.getByLabel('PIN').fill(pin)
+      const unlocked = shared.waitForResponse(isPath(/^\/api\/shared\/[^/]+\/unlock$/, 'POST'))
       await shared.getByRole('button', { name: 'Unlock' }).click()
+      const { token } = (await (await unlocked).json()) as { token: string }
+      expect(token).toBeTruthy()
 
       await expect(shared.getByRole('heading', { name: 'Note A' })).toBeVisible()
       await expect(shared.getByText('Shared note · read-only')).toBeVisible()
@@ -269,9 +279,11 @@ test('notes smoke path: organize, write, upload images and files, share by PIN, 
       await expectPdfViewerWorks(content)
       await expectGpxDownload(shared, content)
       expect(sharedCspViolations).toEqual([])
-      // the token stays in memory, never in the URL (the page's or any request's)
+      // the unlock token (and the PIN) stay in memory, never in the URL (the page's or any request's)
       expect(shared.url()).toBe(pinLink)
-      expect(requested.filter((url) => url.includes(encodeURIComponent(pin)) || url.includes(pin))).toEqual([])
+      const leaks = (secret: string) => (url: string) => url.includes(secret) || url.includes(encodeURIComponent(secret))
+      expect(requested.filter(leaks(token))).toEqual([])
+      expect(requested.filter(leaks(pin))).toEqual([])
     } finally {
       await visitor.close()
     }

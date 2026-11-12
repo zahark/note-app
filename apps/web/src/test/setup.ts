@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach, vi } from 'vitest'
+import { toast } from 'sonner'
 import { resetSavers } from '@/features/editor/api'
 
 // jsdom lacks ResizeObserver, which react-resizable-panels needs
@@ -10,6 +11,25 @@ if (!('ResizeObserver' in globalThis)) {
     unobserve() {}
     disconnect() {}
   } as unknown as typeof ResizeObserver
+}
+
+// jsdom lacks IntersectionObserver (the PDF viewer loads once it is in view); by default everything
+// observed is reported as in view at once. Tests of the gating stub their own.
+if (!('IntersectionObserver' in globalThis)) {
+  globalThis.IntersectionObserver = class {
+    private readonly callback: IntersectionObserverCallback
+    constructor(callback: IntersectionObserverCallback) {
+      this.callback = callback
+    }
+    observe(target: Element) {
+      this.callback([{ isIntersecting: true, target } as IntersectionObserverEntry], this as unknown as IntersectionObserver)
+    }
+    unobserve() {}
+    disconnect() {}
+    takeRecords() {
+      return []
+    }
+  } as unknown as typeof IntersectionObserver
 }
 
 // jsdom lacks matchMedia (used by sonner and the layout); default to a wide screen with no preferences
@@ -39,6 +59,9 @@ if (typeof document.elementFromPoint !== 'function') {
 
 afterEach(() => {
   cleanup()
+  // sonner's toast store is global and replays every still-active toast to a newly mounted Toaster,
+  // so a toast left by one test would show up again in the next
+  toast.dismiss()
   // a save a test held back must not make a later test's note load wait for it
   resetSavers()
   vi.unstubAllGlobals()

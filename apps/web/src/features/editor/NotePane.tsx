@@ -1,24 +1,24 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { NodeSelection } from '@tiptap/pm/state'
 import { EditorContent, useEditor, type Editor } from '@tiptap/react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { ShareButton } from '@/features/share/ShareDialog'
 import { ApiError, errorMessage, isNotFound } from '@/lib/api'
+import { handleUnauthorized } from '@/lib/queryClient'
 import {
-  ACCEPTED_FILE_EXTENSIONS,
+  ACCEPTED_FILE_TYPES,
   ACCEPTED_IMAGE_TYPES,
   checkUploadFile,
   downloadOwnerAttachment,
   ownerAttachmentUrl,
   uploadAttachment,
-  uploadFilesFrom,
   useNote,
   type Note,
-  type UploadKind,
+  type UploadedAttachment,
 } from './api'
-import { attachmentSrc } from './AttachmentImage'
+import { attachmentSrc } from './attachmentRef'
 import { ConflictPrompt } from './ConflictPrompt'
 import { editorExtensions, toEditorContent } from './extensions'
 import { SaveIndicator } from './SaveIndicator'
@@ -90,6 +90,7 @@ interface NoteEditorProps {
 
 function NoteEditor({ note, onReload }: NoteEditorProps) {
   const { status, schedule, error: saveError } = useAutosave({ noteId: note.id, version: note.version })
+  const queryClient = useQueryClient()
   const upload = useMutation({ mutationFn: uploadAttachment })
   const [uploading, setUploading] = useState(0)
   const imageInput = useRef<HTMLInputElement>(null)
@@ -97,23 +98,24 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
 
   /**
    * Uploads each file, then inserts it (at `pos`, or at the cursor) as `attachment://<aid>`: an image
-   * node for an image, a file node for a PDF or GPX. A selected node (such as the attachment inserted
+   * node for an image, a file node for a PDF or GPX, by the kind the server detected from the content
+   * (a renamed file still gets the right node). A selected node (such as the attachment inserted
    * just before) is kept: the new one goes after it instead of replacing it. A rate limit or full
    * storage stops the batch with one message instead of one per remaining file.
    */
   const insertAttachments = async (editor: Editor, files: File[], pos?: number) => {
     let at = pos
     for (const [index, file] of files.entries()) {
-      const { kind, problem } = checkUploadFile(file)
-      if (problem !== undefined) {
+      const problem = checkUploadFile(file)
+      if (problem !== null) {
         toast.error(problem)
         continue
       }
       setUploading((n) => n + 1)
       try {
-        const aid = await upload.mutateAsync(file)
+        const uploaded = await upload.mutateAsync(file)
         if (editor.isDestroyed) return
-        const node = attachmentNode(kind, aid, file)
+        const node = attachmentNode(uploaded, file)
         const { selection } = editor.state
         if (at === undefined && selection instanceof NodeSelection) {
           editor.chain().focus().insertContentAt(selection.to, node).run()
@@ -144,7 +146,14 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
   const editor = useEditor({
     extensions: editorExtensions({
       resolveAttachment: ownerAttachmentUrl,
-      downloadAttachment: downloadOwnerAttachment,
+      downloadAttachment: (aid, displayName) => {
+        downloadOwnerAttachment(aid).catch((err: unknown) => {
+          handleUnauthorized(queryClient, err)
+          toast.error(`Could not download ${displayName}: ${errorMessage(err)}`)
+        })
+      },
+      // the viewer shows its own error; an expired session still goes to login, as for any request
+      onPreviewError: (err) => handleUnauthorized(queryClient, err),
       placeholder: 'Start writing…',
     }),
     content: toEditorContent(note.content),
@@ -152,7 +161,7 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
     editorProps: {
       attributes: { class: 'note-content', 'aria-label': 'Note content' },
       handlePaste: (view, event) => {
-        const files = uploadFilesFrom(event.clipboardData)
+        const files = Array.from(event.clipboardData?.files ?? [])
         if (files.length === 0) return false
         const e = editorFromView(view)
         if (e) void insertAttachmentsRef.current(e, files)
@@ -160,7 +169,7 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
       },
       handleDrop: (view, event, _slice, moved) => {
         if (moved) return false
-        const files = uploadFilesFrom(event.dataTransfer)
+        const files = Array.from(event.dataTransfer?.files ?? [])
         if (files.length === 0) return false
         event.preventDefault()
         const e = editorFromView(view)
@@ -192,7 +201,7 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
       />
       <UploadInput
         inputRef={fileInput}
-        accept={ACCEPTED_FILE_EXTENSIONS.join(',')}
+        accept={ACCEPTED_FILE_TYPES.join(',')}
         testId="attach-file-input"
         onFiles={(files) => void insertAttachments(editor, files)}
       />
@@ -237,11 +246,15 @@ function UploadInput({ inputRef, accept, testId, onFiles }: UploadInputProps) {
   )
 }
 
-/** The node an uploaded file becomes: an image, or a file node (PDF, GPX) carrying its name and size for display. */
-function attachmentNode(kind: UploadKind, aid: string, file: File) {
-  const src = attachmentSrc(aid)
+/**
+ * The node an upload becomes, by the kind the server detected: an image, or a file node (PDF, GPX)
+ * carrying the server's stored name (always ending in `.pdf` / `.gpx`, the name downloads get) and
+ * size for display.
+ */
+function attachmentNode({ id, kind, size, name }: UploadedAttachment, file: File) {
+  const src = attachmentSrc(id)
   if (kind === 'image') return { type: 'image', attrs: { src, alt: file.name || null } }
-  return { type: 'attachmentFile', attrs: { src, name: file.name || null, size: file.size, kind } }
+  return { type: 'attachmentFile', attrs: { src, name, size, kind } }
 }
 
 /** The TipTap editor a ProseMirror view belongs to (TipTap sets `view.dom.editor`). */

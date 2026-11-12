@@ -80,9 +80,13 @@ async function toApiError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, 'HTTP_ERROR', `Request failed (${res.status})`, retryAfter)
 }
 
-/** Performs a request and returns the parsed JSON body (`undefined` for an empty or 204 response). */
-export async function apiFetch<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { accept: 'application/json', ...opts.headers }
+/**
+ * Performs a request and returns the successful `Response`, for a caller that reads a non-JSON body (a
+ * file download, a PDF preview's bytes); a network failure or error status becomes an `ApiError`, as
+ * with `apiFetch`. It sends no `accept` header of its own (the caller may pass one in `headers`).
+ */
+export async function apiFetchResponse(path: string, opts: RequestOptions = {}): Promise<Response> {
+  const headers: Record<string, string> = { ...opts.headers }
   let body: BodyInit | undefined
   if (opts.body instanceof FormData || opts.body instanceof Blob) {
     body = opts.body
@@ -107,6 +111,12 @@ export async function apiFetch<T = unknown>(path: string, opts: RequestOptions =
   }
 
   if (!res.ok) throw await toApiError(res)
+  return res
+}
+
+/** Performs a request and returns the parsed JSON body (`undefined` for an empty or 204 response). */
+export async function apiFetch<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const res = await apiFetchResponse(path, { ...opts, headers: { accept: 'application/json', ...opts.headers } })
   if (res.status === 204) return undefined as T
   const text = await res.text()
   return (text ? JSON.parse(text) : undefined) as T

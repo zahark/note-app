@@ -1,10 +1,10 @@
-import { Editor, type JSONContent } from '@tiptap/core'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError, isUnauthorized } from '@/lib/api'
+import { destroyEditors, doc, fileNode, makeEditor, ownerResolver } from '@/test/editor'
 import type { AttachmentDownloader } from './AttachmentFile'
-import { attachmentSrc } from './AttachmentImage'
-import { editorExtensions } from './extensions'
+import { attachmentSrc } from './attachmentRef'
 import { loadPdf, type PdfDocument, type PdfLoad } from './pdf'
 import { PdfViewer } from './PdfViewer'
 
@@ -15,7 +15,6 @@ const loadPdfMock = vi.mocked(loadPdf)
 const AID = '0b4c2f7e-1d2a-4c3b-9e8f-0123456789ab'
 const OTHER_AID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
 const PDF_BYTES = [0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37] // %PDF-1.7
-const ownerResolver = (aid: string) => `/api/attachments/${aid}`
 
 interface FakePdf {
   doc: PdfDocument
@@ -170,6 +169,52 @@ describe('PdfViewer', () => {
     expect(loadPdfMock).not.toHaveBeenCalled()
   })
 
+  it('an expired session is reported to onError as a session 401 (ApiError), with the error state shown', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    const onError = vi.fn()
+    render(<PdfViewer aid={AID} resolveAttachment={ownerResolver} onError={onError} />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Preview unavailable')
+    expect(onError).toHaveBeenCalledTimes(1)
+    const err: unknown = onError.mock.calls[0]![0]
+    expect(err).toBeInstanceOf(ApiError)
+    expect(isUnauthorized(err)).toBe(true)
+    expect(loadPdfMock).not.toHaveBeenCalled()
+  })
+
+  it('a PDF.js failure is reported to onError too; a successful load never calls it', async () => {
+    const broken = fakePdf(1)
+    const failure = new Error('Invalid PDF structure')
+    broken.reject(failure)
+    loadPdfMock.mockReturnValue(broken.load)
+    const onError = vi.fn()
+    const { unmount } = render(<PdfViewer aid={AID} resolveAttachment={ownerResolver} onError={onError} />)
+    await screen.findByRole('alert')
+    expect(onError).toHaveBeenCalledWith(failure)
+    unmount()
+
+    const ok = fakePdf(1)
+    ok.resolve()
+    loadPdfMock.mockReturnValue(ok.load)
+    const onOkError = vi.fn()
+    render(<PdfViewer aid={AID} resolveAttachment={ownerResolver} onError={onOkError} />)
+    await screen.findByText('Page 1 of 1')
+    expect(onOkError).not.toHaveBeenCalled()
+  })
+
+  it('fetches the bytes without asking for JSON', async () => {
+    loadPdfMock.mockReturnValue(fakePdf(1).load)
+    render(<PdfViewer aid={AID} resolveAttachment={ownerResolver} />)
+    await waitFor(() => expect(loadPdfMock).toHaveBeenCalledTimes(1))
+    const init = (fetchMock.mock.calls[0] as unknown[])[1] as RequestInit
+    expect((init.headers as Record<string, string>).accept).toBeUndefined()
+  })
+
   it('shows "Preview unavailable" when the resolver fails or there is none', async () => {
     const failing = vi.fn(() => Promise.reject(new Error('unavailable')))
     const { unmount } = render(<PdfViewer aid={AID} resolveAttachment={failing} />)
@@ -191,6 +236,81 @@ describe('PdfViewer', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Preview unavailable')
   })
 
+  it('fits the page to the container width and re-renders when that width changes', async () => {
+    let report!: (width: number) => void
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          report = (width) =>
+            callback([{ contentRect: { width } } as ResizeObserverEntry], this as unknown as ResizeObserver)
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+    const pdf = fakePdf(2)
+    pdf.resolve()
+    loadPdfMock.mockReturnValue(pdf.load)
+    const { container } = render(<PdfViewer aid={AID} resolveAttachment={ownerResolver} />)
+    await screen.findByText('Page 1 of 2')
+
+    act(() => report(320))
+    expect(pdf.renderPage).toHaveBeenLastCalledWith(1, expect.any(HTMLCanvasElement), 320)
+    act(() => report(480.6))
+    expect(pdf.renderPage).toHaveBeenLastCalledWith(1, expect.any(HTMLCanvasElement), 480)
+    const calls = pdf.renderPage.mock.calls.length
+    act(() => report(480.2))
+    expect(pdf.renderPage).toHaveBeenCalledTimes(calls)
+    // the scroll box always reserves the scrollbar gutter, so a scrollbar never changes the fitted width
+    expect(container.querySelector('.overflow-auto')).toHaveClass('[scrollbar-gutter:stable]')
+  })
+
+  it('fetches and opens the PDF only once the viewer comes into view', async () => {
+    let reveal!: () => void
+    const observe = vi.fn()
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          reveal = () => callback([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver)
+        }
+        observe = observe
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+    const pdf = fakePdf(1)
+    pdf.resolve()
+    loadPdfMock.mockReturnValue(pdf.load)
+    render(<PdfViewer aid={AID} resolveAttachment={ownerResolver} />)
+
+    await act(async () => {})
+    expect(observe).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('status')).toHaveTextContent('Loading preview')
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(loadPdfMock).not.toHaveBeenCalled()
+
+    act(() => reveal())
+    expect(await screen.findByText('Page 1 of 1')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts a running fetch of the bytes on unmount', async () => {
+    let signal: AbortSignal | undefined
+    fetchMock.mockImplementation((_input, init?: RequestInit) => {
+      signal = init?.signal ?? undefined
+      return new Promise<Response>(() => {})
+    })
+    const { unmount } = render(<PdfViewer aid={AID} resolveAttachment={ownerResolver} />)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(signal?.aborted).toBe(false)
+    unmount()
+    expect(signal?.aborted).toBe(true)
+    expect(loadPdfMock).not.toHaveBeenCalled()
+  })
+
   it('destroys the PDF on unmount, also while it is still loading', async () => {
     const loaded = fakePdf(1)
     loaded.resolve()
@@ -210,40 +330,15 @@ describe('PdfViewer', () => {
 })
 
 describe('PdfViewer in the AttachmentFile node view', () => {
-  const editors: Editor[] = []
+  afterEach(destroyEditors)
 
-  function makeEditor(content: JSONContent, downloadAttachment: AttachmentDownloader | null = null) {
-    const element = document.createElement('div')
-    document.body.appendChild(element)
-    let editor!: Editor
-    act(() => {
-      editor = new Editor({
-        element,
-        extensions: editorExtensions({ resolveAttachment: ownerResolver, downloadAttachment }),
-        content,
-      })
-    })
-    editors.push(editor)
-    return editor
-  }
-
-  afterEach(async () => {
-    await act(async () => {
-      while (editors.length) editors.pop()!.destroy()
-    })
-    document.body.innerHTML = ''
-  })
-
-  const fileNode = (aid: string, kind: 'pdf' | 'gpx', name: string): JSONContent => ({
-    type: 'attachmentFile',
-    attrs: { src: attachmentSrc(aid), name, size: 1234, kind },
-  })
+  const pdfNode = (aid: string, name: string) => fileNode(attachmentSrc(aid), { kind: 'pdf', name })
 
   it('a PDF node shows the viewer with page 1', async () => {
     const pdf = fakePdf(2)
     pdf.resolve()
     loadPdfMock.mockReturnValue(pdf.load)
-    const editor = makeEditor({ type: 'doc', content: [fileNode(AID, 'pdf', 'guide.pdf')] })
+    const editor = makeEditor(doc(pdfNode(AID, 'guide.pdf')))
 
     expect(await screen.findByText('Page 1 of 2')).toBeInTheDocument()
     const slot = editor.view.dom.querySelector('[data-role="pdf-viewer"]')!
@@ -256,14 +351,14 @@ describe('PdfViewer in the AttachmentFile node view', () => {
     const pdf = fakePdf(2)
     pdf.resolve()
     loadPdfMock.mockReturnValue(pdf.load)
-    makeEditor({ type: 'doc', content: [fileNode(AID, 'pdf', 'guide.pdf')] })
+    makeEditor(doc(pdfNode(AID, 'guide.pdf')))
 
     await user.click(await screen.findByRole('button', { name: 'Next page' }))
     expect(screen.getByText('Page 2 of 2')).toBeInTheDocument()
   })
 
   it('is not created for a GPX node (nothing is fetched or loaded)', async () => {
-    makeEditor({ type: 'doc', content: [fileNode(AID, 'gpx', 'route.gpx')] })
+    makeEditor(doc(fileNode(attachmentSrc(AID))))
     await act(async () => {})
     expect(document.querySelector('[data-role="pdf-viewer"]')).toBeNull()
     expect(document.querySelector('.pdf-viewer')).toBeNull()
@@ -277,7 +372,7 @@ describe('PdfViewer in the AttachmentFile node view', () => {
     pdf.reject(new Error('corrupt'))
     loadPdfMock.mockReturnValue(pdf.load)
     const download = vi.fn<AttachmentDownloader>()
-    makeEditor({ type: 'doc', content: [fileNode(AID, 'pdf', 'broken.pdf')] }, download)
+    makeEditor(doc(pdfNode(AID, 'broken.pdf')), { downloadAttachment: download })
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Preview unavailable, download instead')
     await user.click(screen.getByRole('button', { name: 'Download broken.pdf' }))
@@ -290,7 +385,7 @@ describe('PdfViewer in the AttachmentFile node view', () => {
     const second = fakePdf(4)
     second.resolve()
     loadPdfMock.mockReturnValueOnce(first.load).mockReturnValueOnce(second.load)
-    const editor = makeEditor({ type: 'doc', content: [fileNode(AID, 'pdf', 'a.pdf')] })
+    const editor = makeEditor(doc(pdfNode(AID, 'a.pdf')))
     await screen.findByText('Page 1 of 1')
 
     act(() => {
@@ -305,7 +400,7 @@ describe('PdfViewer in the AttachmentFile node view', () => {
     const pdf = fakePdf(1)
     pdf.resolve()
     loadPdfMock.mockReturnValue(pdf.load)
-    const editor = makeEditor({ type: 'doc', content: [fileNode(AID, 'pdf', 'guide.pdf')] })
+    const editor = makeEditor(doc(pdfNode(AID, 'guide.pdf')))
     await screen.findByText('Page 1 of 1')
 
     await act(async () => {

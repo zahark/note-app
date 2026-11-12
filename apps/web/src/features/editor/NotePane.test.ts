@@ -2,24 +2,34 @@ import { createElement } from 'react'
 import type { Editor, JSONContent } from '@tiptap/core'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { meQueryKey } from '@/features/auth/api'
 import { treeQueryKey, type TreeData } from '@/features/tree/api'
 import { MOBILE_QUERY } from '@/hooks/useMediaQuery'
-import { mockFetch, renderApp, renderWithProviders, testUser, type MockResponse } from '@/test/utils'
+import { ApiError } from '@/lib/api'
+import { doc, fileNode, fileNodes } from '@/test/editor'
+import {
+  mockFetch,
+  renderApp,
+  renderWithProviders,
+  testUser,
+  unauthorizedResponse,
+  type MockResponse,
+  type RecordedRequest,
+} from '@/test/utils'
 import { checkUploadFile, MAX_FILE_BYTES, MAX_IMAGE_BYTES, uploadKindOf } from './api'
 import { NotePane } from './NotePane'
 import { mountPdfViewer } from './pdfViewerMount'
 
 // the PDF viewer has its own tests (PdfViewer.test.tsx); here a PDF node must not load PDF.js
 vi.mock('./pdfViewerMount', () => ({
-  mountPdfViewer: vi.fn(() => ({ update: vi.fn(), destroy: vi.fn() })),
+  mountPdfViewer: vi.fn(() => ({ destroy: vi.fn() })),
 }))
 
 const NOTE_ID = '22222222-2222-4222-8222-222222222222'
 const AID = '0b4c2f7e-1d2a-4c3b-9e8f-0123456789ab'
 const AID2 = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
 
-const doc = (...content: JSONContent[]): JSONContent => ({ type: 'doc', content })
 const text = (value: string): JSONContent => doc({ type: 'paragraph', content: [{ type: 'text', text: value }] })
 
 const summary = (title = 'My note') => ({
@@ -55,17 +65,6 @@ function imageSrcs(json: JSONContent): string[] {
   return out
 }
 
-/** Every file node's attrs in a TipTap JSON document. */
-function fileNodes(json: JSONContent): Record<string, unknown>[] {
-  const out: Record<string, unknown>[] = []
-  const walk = (node: JSONContent) => {
-    if (node.type === 'attachmentFile') out.push({ ...node.attrs })
-    node.content?.forEach(walk)
-  }
-  walk(json)
-  return out
-}
-
 /** A file that reports `size` bytes without allocating them. */
 function sized(file: File, size: number): File {
   Object.defineProperty(file, 'size', { value: size })
@@ -76,6 +75,24 @@ const pdf = (name = 'guide.pdf', type = 'application/pdf') => new File(['%PDF-1.
 const gpx = (name = 'track.gpx', type = '') => new File(['<gpx version="1.1"></gpx>'], name, { type })
 
 const png = (name = 'cat.png') => new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], name, { type: 'image/png' })
+
+/**
+ * The server's answer to `POST /api/attachments`: the kind detected from the file's first bytes (as the
+ * server does, whatever the name or declared type), with the next id from `ids`, and the stored name
+ * (a PDF or GPX name forced to end in `.pdf` / `.gpx`, as the server does).
+ */
+async function uploadedResponse(req: RecordedRequest, ids: string[]): Promise<MockResponse> {
+  const file = (req.body as FormData).get('file') as File
+  const head = await file.slice(0, 5).text()
+  const [kind, mime] = head.startsWith('%PDF-')
+    ? ['pdf', 'application/pdf']
+    : head.startsWith('<gpx')
+      ? ['gpx', 'application/gpx+xml']
+      : ['image', 'image/png']
+  const extension = kind === 'image' ? '' : `.${kind}`
+  const name = file.name.toLowerCase().endsWith(extension) ? file.name : `${file.name}${extension}`
+  return { status: 201, body: { id: ids.shift(), kind, mime, size: file.size, name } }
+}
 
 /** A paste/drop event carrying files, the way the browser delivers them. */
 function fileEvent(type: 'paste' | 'drop', files: File[], coords = { clientX: 0, clientY: 0 }) {
@@ -276,7 +293,7 @@ describe('image upload', () => {
     const fetch = mockFetch({
       'GET /api/tree': treeWith(),
       [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(content) } },
-      'POST /api/attachments': () => ({ status: 201, body: { id: aids.shift() } }),
+      'POST /api/attachments': (req) => uploadedResponse(req, aids),
       [`PUT /api/notes/${NOTE_ID}/content`]: { body: { version: 2 } },
     })
     return { ...fetch, ...renderPane() }
@@ -386,12 +403,13 @@ describe('upload file checks', () => {
   })
 
   it('applies the per-kind size limits', () => {
-    expect(checkUploadFile(sized(png(), MAX_IMAGE_BYTES))).toEqual({ kind: 'image' })
-    expect(checkUploadFile(sized(png(), MAX_IMAGE_BYTES + 1)).problem).toBe('cat.png is larger than 10 MB')
-    expect(checkUploadFile(sized(pdf(), MAX_IMAGE_BYTES + 1))).toEqual({ kind: 'pdf' })
-    expect(checkUploadFile(sized(pdf(), MAX_FILE_BYTES))).toEqual({ kind: 'pdf' })
-    expect(checkUploadFile(sized(pdf(), MAX_FILE_BYTES + 1)).problem).toBe('guide.pdf is larger than 25 MB')
-    expect(checkUploadFile(sized(gpx(), MAX_FILE_BYTES + 1)).problem).toBe('track.gpx is larger than 25 MB')
+    expect(checkUploadFile(sized(png(), MAX_IMAGE_BYTES))).toBeNull()
+    expect(checkUploadFile(sized(png(), MAX_IMAGE_BYTES + 1))).toBe('cat.png is larger than 10 MB')
+    expect(checkUploadFile(sized(pdf(), MAX_IMAGE_BYTES + 1))).toBeNull()
+    expect(checkUploadFile(sized(pdf(), MAX_FILE_BYTES))).toBeNull()
+    expect(checkUploadFile(sized(pdf(), MAX_FILE_BYTES + 1))).toBe('guide.pdf is larger than 25 MB')
+    expect(checkUploadFile(sized(gpx(), MAX_FILE_BYTES))).toBeNull()
+    expect(checkUploadFile(sized(gpx(), MAX_FILE_BYTES + 1))).toBe('track.gpx is larger than 25 MB')
   })
 })
 
@@ -401,17 +419,18 @@ describe('file attachments', () => {
     const fetch = mockFetch({
       'GET /api/tree': treeWith(),
       [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(content) } },
-      'POST /api/attachments': () => ({ status: 201, body: { id: aids.shift() } }),
+      'POST /api/attachments': (req) => uploadedResponse(req, aids),
       [`PUT /api/notes/${NOTE_ID}/content`]: { body: { version: 2 } },
     })
     return { ...fetch, ...renderPane() }
   }
 
-  it('the toolbar "Attach file" button opens a file input that accepts .pdf and .gpx', async () => {
+  it('the toolbar "Attach file" button opens a file input that accepts PDF and GPX by type and extension', async () => {
     setup()
     await findEditor()
     const input = screen.getByTestId('attach-file-input')
-    expect(input).toHaveAttribute('accept', '.pdf,.gpx')
+    // the MIME types keep GPX pickable on iOS, which has no system type for the .gpx extension
+    expect(input).toHaveAttribute('accept', 'application/pdf,application/gpx+xml,.pdf,.gpx')
     expect(input).toHaveAttribute('multiple')
     const click = vi.spyOn(input, 'click')
     await userEvent.click(screen.getByRole('button', { name: 'Attach file' }))
@@ -433,7 +452,22 @@ describe('file attachments', () => {
       'guide.pdf',
     )
     expect(imageSrcs(editor.getJSON())).toEqual([])
-    expect(vi.mocked(mountPdfViewer)).toHaveBeenCalledWith(expect.any(HTMLElement), AID, expect.any(Function))
+    expect(vi.mocked(mountPdfViewer)).toHaveBeenCalledWith(expect.any(HTMLElement), AID, expect.any(Function), expect.any(Function))
+  })
+
+  it("a PDF preview failing with an expired session signs the user out; any other preview failure does not", async () => {
+    vi.mocked(mountPdfViewer).mockClear()
+    const { client } = setup(doc(fileNode(`attachment://${AID}`, { name: 'guide.pdf', kind: 'pdf' })))
+    client.setQueryData(meQueryKey, testUser)
+    await findEditor()
+    const onPreviewError = vi.mocked(mountPdfViewer).mock.calls.at(-1)![3]!
+
+    onPreviewError(new ApiError(404, 'NOT_FOUND', 'Attachment not found'))
+    onPreviewError(new Error('Invalid PDF structure'))
+    expect(client.getQueryData(meQueryKey)).toEqual(testUser)
+
+    onPreviewError(new ApiError(401, 'UNAUTHORIZED', 'Authentication required'))
+    expect(client.getQueryData(meQueryKey)).toBeNull()
   })
 
   it.each([
@@ -465,6 +499,16 @@ describe('file attachments', () => {
     act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [pdf(), gpx()])))
     await waitFor(() => expect(fileNodes(editor.getJSON()).map((n) => n.kind)).toEqual(['pdf', 'gpx']))
     expect(fileNodes(editor.getJSON()).map((n) => n.src)).toEqual([`attachment://${AID}`, `attachment://${AID2}`])
+  })
+
+  it("a file node is named with the server's stored name, which ends in the detected kind's extension", async () => {
+    setup()
+    const editor = await findEditor()
+    // PDF bytes named .exe (declared as PDF), GPX bytes named .xml (declared as GPX)
+    const files = [pdf('Route guide.exe'), gpx('ridge.xml', 'application/gpx+xml')]
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', files)))
+    await waitFor(() => expect(fileNodes(editor.getJSON())).toHaveLength(2))
+    expect(fileNodes(editor.getJSON()).map((n) => n.name)).toEqual(['Route guide.exe.pdf', 'ridge.xml.gpx'])
   })
 
   it('dropping a mixed batch inserts image and file nodes at the drop point in order', async () => {
@@ -520,7 +564,9 @@ describe('file attachments', () => {
       'GET /api/tree': treeWith(),
       [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Body')) } },
       'POST /api/attachments': () =>
-        ++calls === 1 ? { status: 201, body: { id: AID } } : { status, body: { error: { code, message } } },
+        ++calls === 1
+          ? { status: 201, body: { id: AID, kind: 'pdf', mime: 'application/pdf', size: 9, name: 'a.pdf' } }
+          : { status, body: { error: { code, message } } },
     })
     renderPane()
     const editor = await findEditor()
@@ -533,17 +579,134 @@ describe('file attachments', () => {
     expect(imageSrcs(editor.getJSON())).toEqual([])
   })
 
-  it("the chip's Download button navigates a download anchor to the owner route, without leaving the page", async () => {
-    setup(doc({ type: 'attachmentFile', attrs: { src: `attachment://${AID}`, name: 'ride.gpx', size: 2048, kind: 'gpx' } }))
-    await findEditor()
-    const clicked: { href: string; download: string; connected: boolean }[] = []
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
-      clicked.push({ href: this.getAttribute('href')!, download: this.download, connected: this.isConnected })
-    })
-    await userEvent.click(await screen.findByRole('button', { name: 'Download ride.gpx' }))
+  it.each([
+    ['a PDF named .png (declared as PNG)', () => new File(['%PDF-1.7\n'], 'scan.png', { type: 'image/png' }), 'pdf'],
+    ['a GPX named .pdf', () => new File(['<gpx version="1.1"></gpx>'], 'track.pdf', { type: 'application/pdf' }), 'gpx'],
+    ['a PDF named .gpx', () => new File(['%PDF-1.7\n'], 'route.gpx', { type: '' }), 'pdf'],
+  ])('builds the node from the kind the server detected: %s', async (_label, makeFile, kind) => {
+    setup()
+    const editor = await findEditor()
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [makeFile()])))
+    await waitFor(() => expect(fileNodes(editor.getJSON()).map((n) => n.kind)).toEqual([kind]))
+    expect(imageSrcs(editor.getJSON())).toEqual([])
+  })
 
-    expect(clicked).toEqual([{ href: `/api/attachments/${AID}`, download: 'ride.gpx', connected: true }])
-    expect(document.querySelector(`a[href="/api/attachments/${AID}"]`)).toBeNull()
-    click.mockRestore()
+  it('a PNG named .pdf becomes an image node, not a PDF viewer', async () => {
+    vi.mocked(mountPdfViewer).mockClear()
+    setup()
+    const editor = await findEditor()
+    const renamed = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'photo.pdf', { type: 'application/pdf' })
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [renamed])))
+    await waitFor(() => expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`]))
+    expect(fileNodes(editor.getJSON())).toEqual([])
+    expect(vi.mocked(mountPdfViewer)).not.toHaveBeenCalled()
+  })
+
+  it('a file inserted while the user has an image selected goes after it instead of replacing it', async () => {
+    const image = { type: 'image', attrs: { src: `attachment://${AID2}` } }
+    setup(doc({ type: 'paragraph', content: [{ type: 'text', text: 'first' }] }, image, { type: 'paragraph', content: [{ type: 'text', text: 'last' }] }))
+    const editor = await findEditor()
+    let imagePos = -1
+    editor.state.doc.forEach((node, offset) => {
+      if (node.type.name === 'image') imagePos = offset
+    })
+    act(() => void editor.commands.setNodeSelection(imagePos))
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [pdf()])))
+
+    await waitFor(() => expect(fileNodes(editor.getJSON())).toHaveLength(1))
+    expect(editor.getJSON().content!.map((n) => n.type)).toEqual(['paragraph', 'image', 'attachmentFile', 'paragraph'])
+    expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID2}`])
+  })
+
+  describe('owner download', () => {
+    beforeEach(() => {
+      let n = 0
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        writable: true,
+        value: vi.fn(() => `blob:http://localhost/${++n}`),
+      })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, writable: true, value: vi.fn() })
+    })
+    afterEach(() => {
+      delete (URL as { createObjectURL?: unknown }).createObjectURL
+      delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL
+    })
+
+    const gpxDoc = doc({ type: 'attachmentFile', attrs: { src: `attachment://${AID}`, name: 'ride.gpx', size: 2048, kind: 'gpx' } })
+
+    function captureDownloads() {
+      const clicked: { href: string; download: string; connected: boolean }[] = []
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+        clicked.push({ href: this.getAttribute('href')!, download: this.download, connected: this.isConnected })
+      })
+      return clicked
+    }
+
+    function setupDownload(response: MockResponse) {
+      const fetch = mockFetch({
+        'GET /api/tree': treeWith(),
+        [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(gpxDoc) } },
+        [`GET /api/attachments/${AID}`]: response,
+      })
+      return { ...fetch, ...renderPane() }
+    }
+
+    it("the chip's Download fetches the owner route with the session and saves the bytes under the stored name", async () => {
+      const clicked = captureDownloads()
+      const { requests } = setupDownload({
+        body: '<gpx/>',
+        headers: { 'content-type': 'application/gpx+xml', 'content-disposition': `attachment; filename="Ridge.gpx"; filename*=UTF-8''Ridge.gpx` },
+      })
+      await findEditor()
+      await userEvent.click(await screen.findByRole('button', { name: 'Download ride.gpx' }))
+
+      await waitFor(() => expect(clicked).toEqual([{ href: 'blob:http://localhost/1', download: 'Ridge.gpx', connected: true }]))
+      const get = requests.find((r) => r.path === `/api/attachments/${AID}`)!
+      expect(get.init.credentials).toBe('same-origin')
+      // a file download does not ask for JSON
+      expect((get.init.headers as Record<string, string>).accept).toBeUndefined()
+      // the saved blob is opaque bytes, and the anchor is temporary
+      expect((vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob).type).toBe('application/octet-stream')
+      expect(document.querySelector('a[href^="blob:"]')).toBeNull()
+    })
+
+    it.each([
+      ['an image (a file node pointing at an image attachment named x.js)', { body: 'GIF89a', headers: { 'content-type': 'image/gif', 'content-disposition': `inline; filename="x.js.gif"; filename*=UTF-8''x.js.gif` } }],
+      ['a GPX without Content-Disposition', { body: '<gpx/>', headers: { 'content-type': 'application/gpx+xml' } }],
+      ['a GPX named x.js', { body: '<gpx/>', headers: { 'content-type': 'application/gpx+xml', 'content-disposition': `attachment; filename="x.js"` } }],
+    ])('a response that is %s is refused with an error, never saved under the node name', async (_name, response) => {
+      const clicked = captureDownloads()
+      setupDownload(response)
+      await findEditor()
+      await userEvent.click(await screen.findByRole('button', { name: 'Download ride.gpx' }))
+
+      expect(await screen.findByText('Could not download ride.gpx: it is not a PDF or GPX file')).toBeInTheDocument()
+      expect(clicked).toEqual([])
+      expect(URL.createObjectURL).not.toHaveBeenCalled()
+    })
+
+    it('a failed download shows an error instead of saving the error body', async () => {
+      const clicked = captureDownloads()
+      setupDownload({ status: 404, body: { error: { code: 'NOT_FOUND', message: 'Attachment not found' } } })
+      await findEditor()
+      await userEvent.click(await screen.findByRole('button', { name: 'Download ride.gpx' }))
+
+      expect(await screen.findByText('Could not download ride.gpx: Attachment not found')).toBeInTheDocument()
+      expect(clicked).toEqual([])
+      expect(URL.createObjectURL).not.toHaveBeenCalled()
+    })
+
+    it('an expired session reports the failure and signs the user out', async () => {
+      const clicked = captureDownloads()
+      const { client } = setupDownload(unauthorizedResponse)
+      client.setQueryData(meQueryKey, testUser)
+      await findEditor()
+      await userEvent.click(await screen.findByRole('button', { name: 'Download ride.gpx' }))
+
+      expect(await screen.findByText(/Could not download ride\.gpx: Authentication required/)).toBeInTheDocument()
+      expect(client.getQueryData(meQueryKey)).toBeNull()
+      expect(clicked).toEqual([])
+    })
   })
 })

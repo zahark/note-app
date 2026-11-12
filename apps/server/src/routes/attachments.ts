@@ -33,7 +33,9 @@ export interface AttachmentRoutesOptions {
 }
 
 /**
- * `POST /api/attachments` (multipart upload of one image, PDF or GPX file; returns `{id}`) and
+ * `POST /api/attachments` (multipart upload of one image, PDF or GPX file; returns
+ * `{id, kind, mime, size, name}` with the kind detected from the content, which the client uses to
+ * pick the node, whatever the file's extension or declared type said) and
  * `GET /api/attachments/:aid` (the caller's own attachment bytes; images inline, other kinds as a
  * sandboxed download, see `attachmentResponseHeaders`). Every route requires a session;
  * another user's attachment is indistinguishable from a missing one (404). Uploads are limited to
@@ -74,7 +76,8 @@ export async function attachmentRoutes(
       { originalName: part.filename, data },
       app.config.uploadQuotaMb,
     )
-    return reply.status(201).send({ id: attachment.id })
+    const { id, kind, mime, size, original_name: name } = attachment
+    return reply.status(201).send({ id, kind, mime, size, name })
   })
 
   app.get('/api/attachments/:aid', async (request, reply) => {

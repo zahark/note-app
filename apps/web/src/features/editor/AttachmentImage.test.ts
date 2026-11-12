@@ -1,8 +1,8 @@
 import { Editor, type JSONContent } from '@tiptap/core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { attachmentSrc, parseAttachmentSrc, type AttachmentResolver } from './AttachmentImage'
-import { editorExtensions } from './extensions'
 import { copyNodeAt, firstNodePos, pasteAtEnd } from '@/test/clipboard'
+import { attachmentSrc, parseAttachmentSrc, type AttachmentResolver } from './attachmentRef'
+import { editorExtensions } from './extensions'
 
 const AID = '0b4c2f7e-1d2a-4c3b-9e8f-0123456789ab'
 const OTHER_AID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
@@ -13,7 +13,7 @@ const editors: Editor[] = []
 function makeEditor(content: JSONContent | undefined, resolveAttachment: AttachmentResolver | null = ownerResolver) {
   const element = document.createElement('div')
   document.body.appendChild(element)
-  const editor = new Editor({ element, extensions: editorExtensions({ resolveAttachment }), content })
+  const editor = new Editor({ element, extensions: editorExtensions({ resolveAttachment, downloadAttachment: () => {} }), content })
   editors.push(editor)
   return editor
 }

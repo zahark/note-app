@@ -1,5 +1,5 @@
 import { mockFetch } from '@/test/utils'
-import { api, apiFetch, ApiError, isNotFound, isUnauthorized, isUnreachable } from './api'
+import { api, apiFetch, apiFetchResponse, ApiError, isNotFound, isUnauthorized, isUnreachable } from './api'
 
 describe('apiFetch', () => {
   it('sends same-origin credentials and parses the JSON body', async () => {
@@ -7,6 +7,15 @@ describe('apiFetch', () => {
     await expect(api.get('/api/tree')).resolves.toEqual({ folders: [], notes: [] })
     expect(requests[0]?.init.credentials).toBe('same-origin')
     expect(requests[0]?.method).toBe('GET')
+  })
+
+  it('asks for JSON; apiFetchResponse (a file body) sends no accept header unless the caller passes one', async () => {
+    const { requests } = mockFetch({ 'GET /api/tree': { body: {} }, 'GET /api/attachments/a1': { body: 'bytes' } })
+    await api.get('/api/tree')
+    await apiFetchResponse('/api/attachments/a1')
+    await apiFetchResponse('/api/attachments/a1', { headers: { accept: 'application/pdf' } })
+    const accepts = requests.map((r) => (r.init.headers as Record<string, string>).accept)
+    expect(accepts).toEqual(['application/json', undefined, 'application/pdf'])
   })
 
   it('serializes a JSON body with a content type', async () => {

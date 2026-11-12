@@ -3,13 +3,17 @@ import { TaskItem, TaskList } from '@tiptap/extension-list'
 import { Placeholder } from '@tiptap/extensions'
 import StarterKit from '@tiptap/starter-kit'
 import { AttachmentFile, type AttachmentDownloader } from './AttachmentFile'
-import { AttachmentImage, type AttachmentResolver } from './AttachmentImage'
+import { AttachmentImage } from './AttachmentImage'
+import type { AttachmentResolver } from './attachmentRef'
+import type { PdfPreviewErrorHandler } from './PdfViewer'
 
 export interface EditorExtensionOptions {
   /** Maps `attachment://<aid>` to a loadable URL inside the image and file node views. */
   resolveAttachment: AttachmentResolver | null
-  /** Downloads a file attachment (the file node's Download button); without one the button is disabled. */
-  downloadAttachment?: AttachmentDownloader | null
+  /** Downloads a file attachment (the file node's Download button). */
+  downloadAttachment: AttachmentDownloader
+  /** Told when a PDF preview fails: the owner passes a 401 to `handleUnauthorized` (the shared view needs none). */
+  onPreviewError?: PdfPreviewErrorHandler
   /** Empty-document hint (editable editors only). */
   placeholder?: string
 }
@@ -21,7 +25,8 @@ export interface EditorExtensionOptions {
  */
 export function editorExtensions({
   resolveAttachment,
-  downloadAttachment = null,
+  downloadAttachment,
+  onPreviewError,
   placeholder,
 }: EditorExtensionOptions): Extensions {
   return [
@@ -36,7 +41,7 @@ export function editorExtensions({
     TaskList,
     TaskItem.configure({ nested: true }),
     AttachmentImage.configure({ resolveAttachment }),
-    AttachmentFile.configure({ resolveAttachment, downloadAttachment }),
+    AttachmentFile.configure({ resolveAttachment, downloadAttachment, onPreviewError: onPreviewError ?? null }),
     ...(placeholder ? [Placeholder.configure({ placeholder })] : []),
   ]
 }
