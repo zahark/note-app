@@ -22,6 +22,8 @@ npm install
 cp .env.example .env   # fill in the secrets
 npm run dev            # server and web dev servers together (web proxies /api to :3000)
 npm test               # all tests in both apps
+npm run test:e2e       # Playwright smoke test (builds, then runs the compiled server on :3100 with a temp DATA_DIR;
+                       # first time: npx playwright install chromium)
 npm run lint           # ESLint + TypeScript type checks
 npm run build          # production build of both apps
 ```

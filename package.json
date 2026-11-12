@@ -14,13 +14,15 @@
     "dev": "concurrently -n server,web -c blue,green \"npm run dev -w apps/server\" \"npm run dev -w apps/web\"",
     "build": "npm run build -w apps/server && npm run build -w apps/web",
     "test": "npm run test -w apps/server && npm run test -w apps/web",
-    "lint": "eslint . && npm run typecheck -w apps/server && npm run typecheck -w apps/web",
+    "lint": "eslint . && npm run typecheck -w apps/server && npm run typecheck -w apps/web && tsc -p e2e/tsconfig.json",
     "start": "npm run start -w apps/server",
     "reset-password": "npm run reset-password -w apps/server --",
-    "backup": "npm run backup -w apps/server --"
+    "backup": "npm run backup -w apps/server --",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.65.0",
     "concurrently": "^10.0.7",
     "eslint": "^10.14.0",
     "eslint-plugin-react-hooks": "^7.1.1",

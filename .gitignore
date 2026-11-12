@@ -6,6 +6,9 @@ dist/
 dist-ssr/
 *.tsbuildinfo
 coverage/
+test-results/
+playwright-report/
+blob-report/
 
 # local data and secrets
 .env
