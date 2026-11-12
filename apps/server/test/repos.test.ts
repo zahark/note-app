@@ -12,6 +12,7 @@ import {
   getFolder,
   listFolders,
   renameFolder,
+  updateFolderParent,
 } from '../src/repos/folders.js'
 import * as notesRepo from '../src/repos/notes.js'
 import {
@@ -22,6 +23,7 @@ import {
   listNoteSummaries,
   renameNote,
   saveNoteContent,
+  updateNoteFolder,
 } from '../src/repos/notes.js'
 import { MissingUserIdError } from '../src/repos/scope.js'
 import { createUser } from '../src/repos/users.js'
@@ -82,6 +84,7 @@ describe('owner-scoped repos require a userId', () => {
         'folders.listFolders',
         'folders.renameFolder',
         'folders.deleteFolder',
+        'folders.updateFolderParent',
         'notes.createNote',
         'notes.getNote',
         'notes.getNoteSummary',
@@ -89,6 +92,7 @@ describe('owner-scoped repos require a userId', () => {
         'notes.renameNote',
         'notes.saveNoteContent',
         'notes.deleteNote',
+        'notes.updateNoteFolder',
         'attachments.createAttachment',
         'attachments.getAttachment',
         'access.resolveAccess',
@@ -175,6 +179,23 @@ describe('folders repo', () => {
     expect(getFolder(db, alice, mid.id)).toBeUndefined()
     expect(getNote(db, alice, note.id)).toBeUndefined()
   })
+
+  it('re-parents only the caller’s folder, and only under the caller’s folder or the root', () => {
+    const a = createFolder(db, alice, { name: 'a', parentFolderId: null })!
+    const b = createFolder(db, alice, { name: 'b', parentFolderId: null })!
+    const bobs = createFolder(db, bob, { name: 'bob', parentFolderId: null })!
+    expect(updateFolderParent(db, alice, b.id, a.id)).toBe(true)
+    expect(getFolder(db, alice, b.id)?.parent_folder_id).toBe(a.id)
+    expect(updateFolderParent(db, alice, b.id, null)).toBe(true)
+    expect(getFolder(db, alice, b.id)?.parent_folder_id).toBeNull()
+
+    expect(updateFolderParent(db, alice, b.id, bobs.id)).toBe(false)
+    expect(updateFolderParent(db, alice, b.id, randomUUID())).toBe(false)
+    expect(updateFolderParent(db, bob, b.id, null)).toBe(false)
+    expect(updateFolderParent(db, bob, a.id, bobs.id)).toBe(false)
+    expect(getFolder(db, alice, b.id)?.parent_folder_id).toBeNull()
+    expect(getFolder(db, alice, a.id)?.parent_folder_id).toBeNull()
+  })
 })
 
 // --- notes ---------------------------------------------------------------------
@@ -255,6 +276,23 @@ describe('notes repo', () => {
     expect(deleteNote(db, bob, note.id)).toBe(false)
 
     expect(getNote(db, alice, note.id)).toMatchObject({ title: 'private', version: 2, content: doc('secret') })
+  })
+
+  it('moves only the caller’s note, only into the caller’s folder or the root, keeping version', () => {
+    const own = createFolder(db, alice, { name: 'own', parentFolderId: null })!
+    const bobs = createFolder(db, bob, { name: 'bob', parentFolderId: null })!
+    const note = createNote(db, alice, { folderId: null, title: 'n' })!
+    saveNoteContent(db, alice, note.id, doc('v2'), 1)
+
+    expect(updateNoteFolder(db, alice, note.id, own.id)).toBe(true)
+    expect(getNote(db, alice, note.id)).toMatchObject({ folder_id: own.id, version: 2 })
+    expect(updateNoteFolder(db, alice, note.id, bobs.id)).toBe(false)
+    expect(updateNoteFolder(db, alice, note.id, randomUUID())).toBe(false)
+    expect(updateNoteFolder(db, bob, note.id, null)).toBe(false)
+    expect(updateNoteFolder(db, bob, note.id, bobs.id)).toBe(false)
+    expect(getNote(db, alice, note.id)?.folder_id).toBe(own.id)
+    expect(updateNoteFolder(db, alice, note.id, null)).toBe(true)
+    expect(getNote(db, alice, note.id)).toMatchObject({ folder_id: null, version: 2 })
   })
 
   it('reports a missing note as not found', () => {

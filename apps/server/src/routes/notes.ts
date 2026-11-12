@@ -9,7 +9,8 @@ import {
   renameNote,
   saveNoteContent,
 } from '../repos/notes.js'
-import { idParams, optionalFolderId } from './schemas.js'
+import { moveNote } from '../services/tree.js'
+import { idParams, moveError, optionalFolderId, targetFolderId } from './schemas.js'
 
 const noteTitle = z.string().max(500)
 
@@ -21,6 +22,9 @@ const createNoteBody = z.strictObject({
 /** Rename only: no `version`, so a rename never takes part in (or is reverted by) autosave. */
 const renameNoteBody = z.strictObject({ title: noteTitle })
 
+/** Move only: `folder_id` is required (null = root); no `version`, so a move never conflicts with autosave. */
+const moveNoteBody = z.strictObject({ folder_id: targetFolderId })
+
 /** Content only: a `title` (or any other field) is rejected, so autosave can never overwrite a rename. */
 const saveContentBody = z.strictObject({
   // a TipTap document; its inner structure is the editor's business
@@ -29,7 +33,8 @@ const saveContentBody = z.strictObject({
 })
 
 /**
- * `POST /api/notes`, `GET|PATCH|DELETE /api/notes/:id`, `PUT /api/notes/:id/content`.
+ * `POST /api/notes`, `GET|PATCH|DELETE /api/notes/:id`, `PUT /api/notes/:id/content`,
+ * `PATCH /api/notes/:id/move`.
  * Every route requires a session.
  */
 export async function noteRoutes(app: FastifyInstance): Promise<void> {
@@ -55,6 +60,15 @@ export async function noteRoutes(app: FastifyInstance): Promise<void> {
     const { title } = renameNoteBody.parse(request.body)
     const userId = request.user!.id
     if (!renameNote(app.db, userId, id, title)) throw notFound('Note not found')
+    return { note: getNoteSummary(app.db, userId, id) }
+  })
+
+  app.patch('/api/notes/:id/move', async (request) => {
+    const { id } = idParams.parse(request.params)
+    const { folder_id } = moveNoteBody.parse(request.body)
+    const userId = request.user!.id
+    const result = moveNote(app.db, userId, id, folder_id)
+    if (!result.ok) throw moveError(result.reason, 'Note')
     return { note: getNoteSummary(app.db, userId, id) }
   })
 

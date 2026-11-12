@@ -45,6 +45,35 @@ const ENDPOINTS: Endpoint[] = [
     name: "path = A's folder",
     url: (i) => `/api/folders/${i.aliceFolder}`,
   },
+  // folder moves (Task 8)
+  {
+    method: 'PATCH',
+    route: '/api/folders/:id/move',
+    name: "path = A's folder, target = root",
+    url: (i) => `/api/folders/${i.aliceFolder}/move`,
+    body: () => ({ parent_folder_id: null }),
+  },
+  {
+    method: 'PATCH',
+    route: '/api/folders/:id/move',
+    name: "path = A's folder, target = B's folder",
+    url: (i) => `/api/folders/${i.aliceFolder}/move`,
+    body: (i) => ({ parent_folder_id: i.bobFolder }),
+  },
+  {
+    method: 'PATCH',
+    route: '/api/folders/:id/move',
+    name: "path = A's folder, target = A's own folder (would be a cycle)",
+    url: (i) => `/api/folders/${i.aliceFolder}/move`,
+    body: (i) => ({ parent_folder_id: i.aliceFolder }),
+  },
+  {
+    method: 'PATCH',
+    route: '/api/folders/:id/move',
+    name: "path = B's folder, body parent_folder_id = A's folder",
+    url: (i) => `/api/folders/${i.bobFolder}/move`,
+    body: (i) => ({ parent_folder_id: i.aliceFolder }),
+  },
   // notes (Task 7)
   {
     method: 'POST',
@@ -78,6 +107,28 @@ const ENDPOINTS: Endpoint[] = [
     route: '/api/notes/:id',
     name: "path = A's note",
     url: (i) => `/api/notes/${i.aliceNote}`,
+  },
+  // note moves (Task 8)
+  {
+    method: 'PATCH',
+    route: '/api/notes/:id/move',
+    name: "path = A's note, target = root",
+    url: (i) => `/api/notes/${i.aliceNote}/move`,
+    body: () => ({ folder_id: null }),
+  },
+  {
+    method: 'PATCH',
+    route: '/api/notes/:id/move',
+    name: "path = A's note, target = B's folder",
+    url: (i) => `/api/notes/${i.aliceNote}/move`,
+    body: (i) => ({ folder_id: i.bobFolder }),
+  },
+  {
+    method: 'PATCH',
+    route: '/api/notes/:id/move',
+    name: "path = B's note, body folder_id = A's folder",
+    url: (i) => `/api/notes/${i.bobNote}/move`,
+    body: (i) => ({ folder_id: i.aliceFolder }),
   },
 ]
 

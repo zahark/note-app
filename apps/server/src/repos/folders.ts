@@ -68,3 +68,27 @@ export function deleteFolder(db: Db, userId: string, folderId: string): boolean 
   requireUserId(userId)
   return db.prepare('DELETE FROM folders WHERE id = ? AND user_id = ?').run(folderId, userId).changes === 1
 }
+
+/**
+ * Re-parents a folder (NULL = root). Returns false, changing nothing, when the folder is not the
+ * caller's or `parentFolderId` is not a folder of the caller (checked in the same statement).
+ * It does NOT check for cycles: callers go through `services/tree.ts#moveFolder`, which does.
+ */
+export function updateFolderParent(
+  db: Db,
+  userId: string,
+  folderId: string,
+  parentFolderId: string | null,
+): boolean {
+  requireUserId(userId)
+  return (
+    db
+      .prepare(
+        `UPDATE folders SET parent_folder_id = @parent
+          WHERE id = @id AND user_id = @userId
+            AND (@parent IS NULL
+                 OR EXISTS (SELECT 1 FROM folders WHERE id = @parent AND user_id = @userId))`,
+      )
+      .run({ id: folderId, userId, parent: parentFolderId }).changes === 1
+  )
+}

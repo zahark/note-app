@@ -128,3 +128,22 @@ export function deleteNote(db: Db, userId: string, noteId: string): boolean {
   requireUserId(userId)
   return db.prepare('DELETE FROM notes WHERE id = ? AND user_id = ?').run(noteId, userId).changes === 1
 }
+
+/**
+ * Moves a note to another folder (NULL = root). Neither `version` nor `updated_at` changes, so a move
+ * never conflicts with autosave. Returns false, changing nothing, when the note is not the caller's or
+ * `folderId` is not a folder of the caller (checked in the same statement).
+ */
+export function updateNoteFolder(db: Db, userId: string, noteId: string, folderId: string | null): boolean {
+  requireUserId(userId)
+  return (
+    db
+      .prepare(
+        `UPDATE notes SET folder_id = @folder
+          WHERE id = @id AND user_id = @userId
+            AND (@folder IS NULL
+                 OR EXISTS (SELECT 1 FROM folders WHERE id = @folder AND user_id = @userId))`,
+      )
+      .run({ id: noteId, userId, folder: folderId }).changes === 1
+  )
+}
