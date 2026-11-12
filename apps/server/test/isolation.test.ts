@@ -1,14 +1,27 @@
 // Cross-user isolation: every private endpoint, called by user B with user A's ids (in path params
 // and in body fields), answers 404 and changes nothing of A's. Each task that adds a private endpoint
 // appends a row to `ENDPOINTS`; the coverage test below fails until it does.
+import { rmSync } from 'node:fs'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { closeApp, errorCode, makeApp, type TestApp } from './helpers/auth.js'
-import { api, doc, loginAs, type Method, type TestUser } from './helpers/api.js'
+import {
+  api,
+  doc,
+  docWithImages,
+  loginAs,
+  tmpDataDir,
+  upload,
+  uploadPng,
+  type Method,
+  type TestUser,
+} from './helpers/api.js'
 
 /** Resources created before every row runs: A's are the targets, B's let a row combine B's own path id with A's body id. */
 interface Ids {
   aliceFolder: string
   aliceNote: string
+  /** Linked to `aliceNote` through its content. */
+  aliceAttachment: string
   bobFolder: string
   bobNote: string
 }
@@ -130,10 +143,17 @@ const ENDPOINTS: Endpoint[] = [
     url: (i) => `/api/notes/${i.bobNote}/move`,
     body: (i) => ({ folder_id: i.aliceFolder }),
   },
+  // attachments (Task 9); the upload takes no id and is in ID_FREE_ROUTES
+  {
+    method: 'GET',
+    route: '/api/attachments/:aid',
+    name: "path = A's attachment",
+    url: (i) => `/api/attachments/${i.aliceAttachment}`,
+  },
 ]
 
 /** Private routes that take no id at all; each has its own scoping test below. */
-const ID_FREE_ROUTES = ['GET /api/tree']
+const ID_FREE_ROUTES = ['GET /api/tree', 'POST /api/attachments']
 
 /** Public surfaces, outside the owner-scoped API. */
 const isPublic = (url: string) =>
@@ -143,10 +163,13 @@ let t: TestApp
 let alice: TestUser
 let bob: TestUser
 let ids: Ids
+let dataDir: string
 const registered: string[] = []
 
 beforeAll(async () => {
+  dataDir = tmpDataDir()
   t = await makeApp({
+    env: { DATA_DIR: dataDir },
     onRoute: (r) => {
       const methods = Array.isArray(r.method) ? r.method : [r.method]
       for (const m of methods) if (m !== 'HEAD') registered.push(`${m} ${r.url}`)
@@ -158,6 +181,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await closeApp(t)
+  rmSync(dataDir, { recursive: true, force: true })
 })
 
 async function create(user: TestUser, url: string, body: object, key: 'folder' | 'note'): Promise<string> {
@@ -170,14 +194,16 @@ async function create(user: TestUser, url: string, body: object, key: 'folder' |
 async function seed(): Promise<Ids> {
   const aliceFolder = await create(alice, '/api/folders', { name: 'A folder' }, 'folder')
   const aliceNote = await create(alice, '/api/notes', { folder_id: aliceFolder, title: 'A note' }, 'note')
+  const aliceAttachment = await uploadPng(t.app, alice)
   const saved = await api(t.app, alice, 'PUT', `/api/notes/${aliceNote}/content`, {
-    content: doc('secret'),
+    content: docWithImages(aliceAttachment),
     version: 1,
   })
   expect(saved.statusCode).toBe(200)
   return {
     aliceFolder,
     aliceNote,
+    aliceAttachment,
     bobFolder: await create(bob, '/api/folders', { name: 'B folder' }, 'folder'),
     bobNote: await create(bob, '/api/notes', { title: 'B note' }, 'note'),
   }
@@ -188,15 +214,25 @@ function aliceState() {
   return {
     folders: t.db.prepare('SELECT * FROM folders WHERE user_id = ? ORDER BY id').all(alice.id),
     notes: t.db.prepare('SELECT * FROM notes WHERE user_id = ? ORDER BY id').all(alice.id),
+    attachments: t.db.prepare('SELECT * FROM attachments WHERE user_id = ? ORDER BY id').all(alice.id),
+    links: t.db
+      .prepare(
+        `SELECT na.* FROM note_attachments na JOIN notes n ON n.id = na.note_id
+          WHERE n.user_id = ? ORDER BY na.note_id, na.attachment_id`,
+      )
+      .all(alice.id),
   }
 }
 
 /** Rows owned by B, to check that a rejected body-id request inserted nothing for B either. */
 function bobRowCount(): number {
   return t.db
-    .prepare('SELECT (SELECT COUNT(*) FROM folders WHERE user_id = ?) + (SELECT COUNT(*) FROM notes WHERE user_id = ?)')
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM folders WHERE user_id = @id) + (SELECT COUNT(*) FROM notes WHERE user_id = @id)
+            + (SELECT COUNT(*) FROM attachments WHERE user_id = @id)`,
+    )
     .pluck()
-    .get(bob.id, bob.id) as number
+    .get({ id: bob.id }) as number
 }
 
 describe('cross-user isolation', () => {
@@ -239,5 +275,20 @@ describe('cross-user isolation', () => {
     expect(notes.length).toBeGreaterThan(0)
     expect([...folders, ...notes].every((r) => r.user_id === bob.id)).toBe(true)
     expect((await api(t.app, null, 'GET', '/api/tree')).statusCode).toBe(401)
+  })
+
+  it("POST /api/attachments as user B creates B's attachment only; without a session → 401", async () => {
+    ids = await seed()
+    const before = aliceState()
+    const res = await upload(t.app, bob)
+    expect(res.statusCode).toBe(201)
+    const owner = t.db.prepare('SELECT user_id FROM attachments WHERE id = ?').pluck().get(res.json().id)
+    expect(owner).toBe(bob.id)
+    expect(aliceState()).toEqual(before)
+
+    const bobRows = bobRowCount()
+    expect((await upload(t.app, null)).statusCode).toBe(401)
+    expect(bobRowCount()).toBe(bobRows)
+    expect(aliceState()).toEqual(before)
   })
 })

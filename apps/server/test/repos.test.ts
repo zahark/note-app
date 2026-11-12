@@ -4,7 +4,12 @@ import { openDb, type Db } from '../src/db/index.js'
 import * as accessRepo from '../src/repos/access.js'
 import { resolveAccess } from '../src/repos/access.js'
 import * as attachmentsRepo from '../src/repos/attachments.js'
-import { createAttachment, getAttachment } from '../src/repos/attachments.js'
+import {
+  createAttachment,
+  getAttachment,
+  listNoteAttachmentIds,
+  setNoteAttachments,
+} from '../src/repos/attachments.js'
 import * as foldersRepo from '../src/repos/folders.js'
 import {
   createFolder,
@@ -95,6 +100,8 @@ describe('owner-scoped repos require a userId', () => {
         'notes.updateNoteFolder',
         'attachments.createAttachment',
         'attachments.getAttachment',
+        'attachments.setNoteAttachments',
+        'attachments.listNoteAttachmentIds',
         'access.resolveAccess',
       ]),
     )
@@ -330,6 +337,33 @@ describe('attachments repo', () => {
     const att = newAttachment(alice)
     expect(getAttachment(db, bob, att.id)).toBeUndefined()
     expect(getAttachment(db, alice, randomUUID())).toBeUndefined()
+  })
+
+  it('setNoteAttachments makes the links equal the given set, keeping only the caller’s attachments', () => {
+    const [a, b, c] = [newAttachment(alice), newAttachment(alice), newAttachment(alice)]
+    const foreign = newAttachment(bob)
+    const note = createNote(db, alice, { folderId: null })!
+    expect(setNoteAttachments(db, alice, note.id, [a.id, b.id, foreign.id, randomUUID()])).toBe(true)
+    expect(listNoteAttachmentIds(db, alice, note.id)).toEqual([a.id, b.id].sort())
+
+    expect(setNoteAttachments(db, alice, note.id, [b.id, c.id, c.id])).toBe(true)
+    expect(listNoteAttachmentIds(db, alice, note.id)).toEqual([b.id, c.id].sort())
+    // the dropped link was stamped by the trigger; the kept ones were not
+    expect(getAttachment(db, alice, a.id)?.last_unlinked_at).not.toBeNull()
+    expect(getAttachment(db, alice, b.id)?.last_unlinked_at).toBeNull()
+  })
+
+  it('setNoteAttachments on another user’s or a missing note changes nothing; listing it is empty', () => {
+    const own = newAttachment(bob)
+    const att = newAttachment(alice)
+    const note = createNote(db, alice, { folderId: null })!
+    setNoteAttachments(db, alice, note.id, [att.id])
+    expect(setNoteAttachments(db, bob, note.id, [own.id])).toBe(false)
+    expect(setNoteAttachments(db, bob, note.id, [])).toBe(false)
+    expect(setNoteAttachments(db, alice, randomUUID(), [att.id])).toBe(false)
+    expect(listNoteAttachmentIds(db, alice, note.id)).toEqual([att.id])
+    expect(listNoteAttachmentIds(db, bob, note.id)).toEqual([])
+    expect(count('SELECT COUNT(*) FROM note_attachments')).toBe(1)
   })
 })
 

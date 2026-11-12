@@ -18,7 +18,7 @@ async function main(): Promise<void> {
 
   // opening the database runs any pending migrations, so the schema is current before listening
   const db = openDataDb(config.dataDir)
-  const app = buildApp({ config, db, logger: true })
+  const app = buildApp({ config, db, logger: true, attachmentSweep: true })
   app.addHook('onClose', async () => {
     db.close()
   })

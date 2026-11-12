@@ -7,8 +7,8 @@ import {
   getNote,
   getNoteSummary,
   renameNote,
-  saveNoteContent,
 } from '../repos/notes.js'
+import { saveContentWithAttachments } from '../services/attachments.js'
 import { moveNote } from '../services/tree.js'
 import { idParams, moveError, optionalFolderId, targetFolderId } from './schemas.js'
 
@@ -75,7 +75,8 @@ export async function noteRoutes(app: FastifyInstance): Promise<void> {
   app.put('/api/notes/:id/content', async (request) => {
     const { id } = idParams.parse(request.params)
     const { content, version } = saveContentBody.parse(request.body)
-    const result = saveNoteContent(app.db, request.user!.id, id, content, version)
+    // also rebuilds the note's attachment references from the content, in the same transaction
+    const result = saveContentWithAttachments(app.db, request.user!.id, id, content, version)
     if (result.ok) return { version: result.version }
     if (result.reason === 'conflict') {
       throw conflict('The note was changed elsewhere; reload it', 'VERSION_CONFLICT')

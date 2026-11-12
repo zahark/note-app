@@ -1,4 +1,7 @@
 // Fixtures for the private API tests: logged-in users and an authenticated request helper.
+import { mkdtempSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify'
 import { cookieValue, login, ORIGIN, seedUser, type TestApp } from './auth.js'
 
@@ -37,4 +40,62 @@ export function api(
 export const doc = (text: string) => ({
   type: 'doc',
   content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+})
+
+/** A real 1×1 PNG. */
+export const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+  'base64',
+)
+
+/** A temporary DATA_DIR for tests that write uploads; remove it with `fs.rmSync(dir, {recursive:true})`. */
+export function tmpDataDir(): string {
+  return mkdtempSync(path.join(os.tmpdir(), 'notes-app-test-'))
+}
+
+export interface UploadFile {
+  filename?: string
+  contentType?: string
+  data?: Buffer
+}
+
+/** `POST /api/attachments` with one multipart file part (a PNG by default). */
+export function upload(
+  app: FastifyInstance,
+  user: TestUser | null,
+  file: UploadFile = {},
+): Promise<LightMyRequestResponse> {
+  const boundary = '----notes-app-test-boundary'
+  const payload = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file"; filename="${file.filename ?? 'cat.png'}"\r\n` +
+        `Content-Type: ${file.contentType ?? 'image/png'}\r\n\r\n`,
+    ),
+    file.data ?? PNG,
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ])
+  return app.inject({
+    method: 'POST',
+    url: '/api/attachments',
+    headers: { origin: ORIGIN, 'content-type': `multipart/form-data; boundary=${boundary}` },
+    cookies: user ? { sid: user.sid } : {},
+    payload,
+  })
+}
+
+/** Uploads a PNG as `user` and returns the new attachment id. */
+export async function uploadPng(app: FastifyInstance, user: TestUser): Promise<string> {
+  const res = await upload(app, user)
+  if (res.statusCode !== 201) throw new Error(`upload failed: ${res.statusCode} ${res.body}`)
+  return (res.json() as { id: string }).id
+}
+
+/** A TipTap document with a paragraph and one image node per attachment id. */
+export const docWithImages = (...aids: string[]) => ({
+  type: 'doc',
+  content: [
+    { type: 'paragraph', content: [{ type: 'text', text: 'pics' }] },
+    ...aids.map((aid) => ({ type: 'image', attrs: { src: `attachment://${aid}` } })),
+  ],
 })
