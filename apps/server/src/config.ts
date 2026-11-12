@@ -27,7 +27,12 @@ export interface Config {
   dataDir: string
   host: string
   port: number
+  /** Fastify log level; `debug` also logs each request's client address and IP key. */
+  logLevel: LogLevel
 }
+
+export const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'] as const
+export type LogLevel = (typeof LOG_LEVELS)[number]
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -120,6 +125,10 @@ const port = optional(
     .default(3000),
 )
 
+const logLevel = optional(
+  z.enum(LOG_LEVELS, { error: `LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')}` }).default('info'),
+)
+
 const envSchema = z.object({
   SESSION_SECRET: secret('SESSION_SECRET'),
   SHARE_HMAC_KEY: secret('SHARE_HMAC_KEY'),
@@ -129,6 +138,7 @@ const envSchema = z.object({
   DATA_DIR: optional(z.string().default(DEFAULT_DATA_DIR)),
   HOST: optional(z.string().default('0.0.0.0')),
   PORT: port,
+  LOG_LEVEL: logLevel,
 })
 
 /**
@@ -155,5 +165,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dataDir: path.resolve(e.DATA_DIR),
     host: e.HOST,
     port: e.PORT,
+    logLevel: e.LOG_LEVEL,
   }
 }

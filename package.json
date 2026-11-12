@@ -15,7 +15,9 @@
     "build": "npm run build -w apps/server && npm run build -w apps/web",
     "test": "npm run test -w apps/server && npm run test -w apps/web",
     "lint": "eslint . && npm run typecheck -w apps/server && npm run typecheck -w apps/web",
-    "reset-password": "npm run reset-password -w apps/server --"
+    "start": "npm run start -w apps/server",
+    "reset-password": "npm run reset-password -w apps/server --",
+    "backup": "npm run backup -w apps/server --"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

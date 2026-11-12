@@ -120,6 +120,16 @@ describe('loadConfig: defaults', () => {
   it.each(['abc', '0', '70000', '-1', '3.5'])('rejects PORT=%s', (value) => {
     expect(() => loadConfig(baseEnv({ PORT: value }))).toThrow('PORT')
   })
+
+  it('defaults LOG_LEVEL to info and accepts the pino levels', () => {
+    expect(loadConfig(baseEnv()).logLevel).toBe('info')
+    expect(loadConfig(baseEnv({ LOG_LEVEL: '' })).logLevel).toBe('info')
+    expect(loadConfig(baseEnv({ LOG_LEVEL: 'debug' })).logLevel).toBe('debug')
+  })
+
+  it.each(['verbose', 'DEBUG', '1'])('rejects LOG_LEVEL=%s', (value) => {
+    expect(() => loadConfig(baseEnv({ LOG_LEVEL: value }))).toThrow('LOG_LEVEL')
+  })
 })
 
 describe('loadConfig: TRUST_PROXY', () => {

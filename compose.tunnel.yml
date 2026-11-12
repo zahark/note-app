@@ -1,0 +1,22 @@
+# Cloudflare Tunnel: cloudflared runs next to the app at a fixed address and nothing is published.
+# Only that single address is trusted for X-Forwarded-For (never the subnet, so the bridge gateway
+# 172.30.0.1 cannot forge it). In the Cloudflare dashboard, point the tunnel's public hostname at
+# http://app:3000 and put the tunnel token in .env as CLOUDFLARE_TUNNEL_TOKEN.
+#   docker compose -f docker-compose.yml -f compose.tunnel.yml up -d
+services:
+  app:
+    environment:
+      TRUST_PROXY: "172.30.0.10"
+
+  cloudflared:
+    # pin a release tag here if you want reproducible upgrades
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env for the tunnel deployment}
+    depends_on:
+      - app
+    networks:
+      notes:
+        ipv4_address: 172.30.0.10

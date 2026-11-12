@@ -20,6 +20,7 @@ import { sharedApiHeaders, sharedRoutes } from './routes/shared.js'
 import { treeRoutes } from './routes/tree.js'
 import { sweepAttachments } from './services/attachments.js'
 import { AuthService } from './services/auth.js'
+import { ipKey } from './services/ipKey.js'
 import type { HashLimiter } from './services/hashLimiter.js'
 import type { PasswordHasher } from './services/password.js'
 import type { Clock } from './services/ratelimit.js'
@@ -103,6 +104,10 @@ export function buildApp({
   app.decorate('config', config)
   app.decorate('db', db)
   app.setErrorHandler(errorHandler)
+  // at LOG_LEVEL=debug, shows which address the per-IP limits see, to check TRUST_PROXY per deployment
+  app.addHook('onRequest', async (request) => {
+    request.log.debug({ ip: request.ip, ipKey: ipKey(request.ip) }, 'client address')
+  })
   // no-referrer / noindex / no-store on every public shared API response, errors and 404s included
   app.addHook('onSend', sharedApiHeaders)
   if (webDir === undefined) {

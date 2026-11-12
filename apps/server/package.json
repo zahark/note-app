@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('src/db/migrations', 'dist/db/migrations', { recursive: true })\"",
     "start": "node dist/index.js",
     "reset-password": "node dist/cli/reset-password.js",
+    "backup": "node dist/cli/backup.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"

@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   const app = buildApp({
     config,
     db,
-    logger: true,
+    logger: { level: config.logLevel },
     attachmentSweep: true,
     webDir: hasWebBuild ? webDir : undefined,
   })

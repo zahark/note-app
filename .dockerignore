@@ -1,0 +1,25 @@
+# keep the build context small and free of secrets and host-built artifacts
+.git
+.gitignore
+.revmux
+.env
+.env.*
+!.env.example
+**/node_modules
+**/dist
+**/dist-ssr
+**/*.tsbuildinfo
+**/coverage
+**/.vite
+data
+docs
+playwright-report
+test-results
+*.log
+.DS_Store
+.idea
+.vscode
+Dockerfile
+.dockerignore
+docker-compose.yml
+compose.*.yml
