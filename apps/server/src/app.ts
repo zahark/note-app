@@ -1,9 +1,12 @@
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import type { Config, TrustProxy } from './config.js'
+import type { Db } from './db/index.js'
 import { errorBody, errorHandler } from './errors.js'
 
 export interface BuildAppOptions {
   config: Config
+  /** Open, migrated database (see `openDb`). The caller owns it and closes it. */
+  db: Db
   /** Fastify logger setting; off by default so tests stay quiet. */
   logger?: FastifyServerOptions['logger']
 }
@@ -11,6 +14,7 @@ export interface BuildAppOptions {
 declare module 'fastify' {
   interface FastifyInstance {
     config: Config
+    db: Db
   }
 }
 
@@ -34,10 +38,11 @@ export function fastifyTrustProxy(
  * Builds the Fastify app without listening, so tests can drive it with `app.inject`.
  * Dependencies are injected; nothing here reads process.env.
  */
-export function buildApp({ config, logger = false }: BuildAppOptions): FastifyInstance {
+export function buildApp({ config, db, logger = false }: BuildAppOptions): FastifyInstance {
   const app = Fastify({ logger, trustProxy: fastifyTrustProxy(config.trustProxy) })
 
   app.decorate('config', config)
+  app.decorate('db', db)
   app.setErrorHandler(errorHandler)
   app.setNotFoundHandler((_request, reply) =>
     reply.status(404).send(errorBody('NOT_FOUND', 'Not found')),

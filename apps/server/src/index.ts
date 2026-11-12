@@ -1,6 +1,7 @@
 // Server entry point: validate config (refusing to boot on bad config), build the app, listen.
 import { buildApp } from './app.js'
 import { ConfigError, loadConfig, type Config } from './config.js'
+import { openDataDb } from './db/index.js'
 import { appInfo } from './meta.js'
 
 async function main(): Promise<void> {
@@ -15,7 +16,12 @@ async function main(): Promise<void> {
     throw err
   }
 
-  const app = buildApp({ config, logger: true })
+  // opening the database runs any pending migrations, so the schema is current before listening
+  const db = openDataDb(config.dataDir)
+  const app = buildApp({ config, db, logger: true })
+  app.addHook('onClose', async () => {
+    db.close()
+  })
   const { name, version } = appInfo()
   app.log.info(`${name} server ${version} starting`)
 

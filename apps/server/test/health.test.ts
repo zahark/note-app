@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { buildApp } from '../src/app.js'
 import { loadConfig } from '../src/config.js'
+import { openDb, type Db } from '../src/db/index.js'
 import { conflict, notFound } from '../src/errors.js'
 
 const config = loadConfig({
@@ -12,9 +13,11 @@ const config = loadConfig({
 })
 
 let app: FastifyInstance
+let db: Db
 
 beforeEach(() => {
-  app = buildApp({ config })
+  db = openDb(':memory:')
+  app = buildApp({ config, db })
   app.get('/test/not-found', async () => {
     throw notFound()
   })
@@ -29,6 +32,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await app.close()
+  db.close()
 })
 
 describe('GET /api/health', () => {
@@ -38,8 +42,9 @@ describe('GET /api/health', () => {
     expect(res.json()).toEqual({ status: 'ok' })
   })
 
-  it('exposes the injected config', () => {
+  it('exposes the injected config and db', () => {
     expect(app.config).toBe(config)
+    expect(app.db).toBe(db)
   })
 })
 

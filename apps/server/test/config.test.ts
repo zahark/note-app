@@ -2,6 +2,7 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { buildApp } from '../src/app.js'
 import { ConfigError, loadConfig, type Config } from '../src/config.js'
+import { openDb } from '../src/db/index.js'
 
 const SECRET = 'a'.repeat(32)
 const KEY = 'b'.repeat(32)
@@ -152,7 +153,11 @@ describe('loadConfig: TRUST_PROXY', () => {
 
 describe('trustProxy wiring into request.ip', () => {
   const ipApp = (trustProxy: Config['trustProxy']) => {
-    const app = buildApp({ config: { ...loadConfig(baseEnv()), trustProxy } })
+    const db = openDb(':memory:')
+    const app = buildApp({ config: { ...loadConfig(baseEnv()), trustProxy }, db })
+    app.addHook('onClose', async () => {
+      db.close()
+    })
     app.get('/test/ip', async (request) => ({ ip: request.ip }))
     return app
   }
