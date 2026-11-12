@@ -1,0 +1,10 @@
+# nginx (or another reverse proxy) on the same host: the app port is published on loopback only, so
+# the proxy is its only client, and one proxy hop is trusted for X-Forwarded-For.
+# nginx must set `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` (see README).
+#   docker compose -f docker-compose.yml -f compose.nginx.yml up -d
+services:
+  app:
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      TRUST_PROXY: "1"

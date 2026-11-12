@@ -1,0 +1,10 @@
+# Direct: the app port is published on every host interface and no proxy is trusted.
+# LAN / testing only. Docker's userland proxy rewrites the source address of IPv6 clients, so all of
+# them share one IP key for the rate limits; public deployments should use the nginx or tunnel override.
+#   docker compose -f docker-compose.yml -f compose.direct.yml up -d
+services:
+  app:
+    ports:
+      - "3000:3000"
+    environment:
+      TRUST_PROXY: ""

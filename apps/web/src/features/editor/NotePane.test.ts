@@ -1,0 +1,712 @@
+import { createElement } from 'react'
+import type { Editor, JSONContent } from '@tiptap/core'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { meQueryKey } from '@/features/auth/api'
+import { treeQueryKey, type TreeData } from '@/features/tree/api'
+import { MOBILE_QUERY } from '@/hooks/useMediaQuery'
+import { ApiError } from '@/lib/api'
+import { doc, fileNode, fileNodes } from '@/test/editor'
+import {
+  mockFetch,
+  renderApp,
+  renderWithProviders,
+  testUser,
+  unauthorizedResponse,
+  type MockResponse,
+  type RecordedRequest,
+} from '@/test/utils'
+import { checkUploadFile, MAX_FILE_BYTES, MAX_IMAGE_BYTES, uploadKindOf } from './api'
+import { NotePane } from './NotePane'
+import { mountPdfViewer } from './pdfViewerMount'
+
+// the PDF viewer has its own tests (PdfViewer.test.tsx); here a PDF node must not load PDF.js
+vi.mock('./pdfViewerMount', () => ({
+  mountPdfViewer: vi.fn(() => ({ destroy: vi.fn() })),
+}))
+
+const NOTE_ID = '22222222-2222-4222-8222-222222222222'
+const AID = '0b4c2f7e-1d2a-4c3b-9e8f-0123456789ab'
+const AID2 = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
+
+const text = (value: string): JSONContent => doc({ type: 'paragraph', content: [{ type: 'text', text: value }] })
+
+const summary = (title = 'My note') => ({
+  id: NOTE_ID,
+  folder_id: null,
+  title,
+  version: 1,
+  created_at: 1,
+  updated_at: 1,
+  share_type: 'private' as const,
+  expires_at: null,
+})
+const fullNote = (content: JSONContent, title = 'My note') => ({ ...summary(title), content })
+const treeWith = (title = 'My note'): MockResponse => ({ body: { folders: [], notes: [summary(title)] } })
+
+function renderPane(onClose = () => {}) {
+  return renderWithProviders(createElement(NotePane, { noteId: NOTE_ID, onClose }))
+}
+
+async function findEditor(): Promise<Editor> {
+  const el = await screen.findByLabelText('Note content')
+  return (el as HTMLElement & { editor: Editor }).editor
+}
+
+/** Every image src in a TipTap JSON document. */
+function imageSrcs(json: JSONContent): string[] {
+  const out: string[] = []
+  const walk = (node: JSONContent) => {
+    if (node.type === 'image') out.push(String(node.attrs?.src))
+    node.content?.forEach(walk)
+  }
+  walk(json)
+  return out
+}
+
+/** A file that reports `size` bytes without allocating them. */
+function sized(file: File, size: number): File {
+  Object.defineProperty(file, 'size', { value: size })
+  return file
+}
+
+const pdf = (name = 'guide.pdf', type = 'application/pdf') => new File(['%PDF-1.7\n'], name, { type })
+const gpx = (name = 'track.gpx', type = '') => new File(['<gpx version="1.1"></gpx>'], name, { type })
+
+const png = (name = 'cat.png') => new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], name, { type: 'image/png' })
+
+/**
+ * The server's answer to `POST /api/attachments`: the kind detected from the file's first bytes (as the
+ * server does, whatever the name or declared type), with the next id from `ids`, and the stored name
+ * (a PDF or GPX name forced to end in `.pdf` / `.gpx`, as the server does).
+ */
+async function uploadedResponse(req: RecordedRequest, ids: string[]): Promise<MockResponse> {
+  const file = (req.body as FormData).get('file') as File
+  const head = await file.slice(0, 5).text()
+  const [kind, mime] = head.startsWith('%PDF-')
+    ? ['pdf', 'application/pdf']
+    : head.startsWith('<gpx')
+      ? ['gpx', 'application/gpx+xml']
+      : ['image', 'image/png']
+  const extension = kind === 'image' ? '' : `.${kind}`
+  const name = file.name.toLowerCase().endsWith(extension) ? file.name : `${file.name}${extension}`
+  return { status: 201, body: { id: ids.shift(), kind, mime, size: file.size, name } }
+}
+
+/** A paste/drop event carrying files, the way the browser delivers them. */
+function fileEvent(type: 'paste' | 'drop', files: File[], coords = { clientX: 0, clientY: 0 }) {
+  const event = new Event(type, { bubbles: true, cancelable: true })
+  const data = { files, types: ['Files'], getData: () => '', setData: () => {}, clearData: () => {}, items: [] }
+  Object.defineProperty(event, type === 'paste' ? 'clipboardData' : 'dataTransfer', { value: data })
+  Object.assign(event, coords)
+  return event
+}
+
+describe('note loading and empty states', () => {
+  it('shows a skeleton while loading, then the title and content', async () => {
+    let release!: () => void
+    mockFetch({
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: () =>
+        new Promise<MockResponse>((resolve) => (release = () => resolve({ body: { note: fullNote(text('Hello')) } }))),
+    })
+    renderPane()
+    expect(await screen.findByRole('status', { name: 'Loading note' })).toBeInTheDocument()
+    await waitFor(() => expect(release).toBeTypeOf('function'))
+    act(() => release())
+
+    const editor = await findEditor()
+    expect(screen.queryByRole('status', { name: 'Loading note' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Note title')).toHaveValue('My note')
+    expect(editor.getText()).toBe('Hello')
+    expect(screen.getByRole('toolbar', { name: 'Formatting' })).toBeInTheDocument()
+  })
+
+  it('an empty note shows the writing placeholder and an empty title shows Untitled', async () => {
+    mockFetch({
+      'GET /api/tree': treeWith(''),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(doc(), '') } },
+    })
+    renderPane()
+    await findEditor()
+    const title = screen.getByLabelText('Note title')
+    expect(title).toHaveValue('')
+    expect(title).toHaveAttribute('placeholder', 'Untitled')
+    await waitFor(() =>
+      expect(document.querySelector('.is-editor-empty')).toHaveAttribute('data-placeholder', 'Start writing…'),
+    )
+  })
+
+  it('a missing note says so and can be closed', async () => {
+    mockFetch({ 'GET /api/tree': treeWith() })
+    const onClose = vi.fn()
+    renderPane(onClose)
+    expect(await screen.findByText('This note does not exist or was deleted.')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('a failed load offers a retry', async () => {
+    let fail = true
+    mockFetch({
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: () =>
+        fail
+          ? { status: 400, body: { error: { code: 'BAD', message: 'bad' } } }
+          : { body: { note: fullNote(text('Back')) } },
+    })
+    renderPane()
+    expect(await screen.findByText('Could not load this note.')).toBeInTheDocument()
+    fail = false
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect((await findEditor()).getText()).toBe('Back')
+  })
+
+  it('opening ?note=<id> in the app shows the note; without it the pane asks to pick one', async () => {
+    mockFetch({
+      'GET /api/auth/me': { body: { user: testUser } },
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('In the app')) } },
+    })
+    renderApp(`/?note=${NOTE_ID}`)
+    expect((await findEditor()).getText()).toBe('In the app')
+
+    const other = renderApp('/')
+    expect(await other.findByText('Select a note or create a new one.')).toBeInTheDocument()
+  })
+
+  it('opening a note from the sidebar does not refetch the tree', async () => {
+    const { requests } = mockFetch({
+      'GET /api/auth/me': { body: { user: testUser } },
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Opened')) } },
+    })
+    renderApp('/')
+    await userEvent.click(await screen.findByRole('button', { name: 'My note' }))
+    expect((await findEditor()).getText()).toBe('Opened')
+    expect(requests.filter((r) => r.path === '/api/tree')).toHaveLength(1)
+  })
+
+  it('on a phone, opening a note from the drawer closes it and shows the note', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === MOBILE_QUERY,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    )
+    mockFetch({
+      'GET /api/auth/me': { body: { user: testUser } },
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Opened')) } },
+    })
+    renderApp('/')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Open sidebar' }))
+    const drawer = await screen.findByRole('dialog')
+    await user.click(await within(drawer).findByRole('button', { name: 'My note' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect((await findEditor()).getText()).toBe('Opened')
+  })
+})
+
+describe('title field', () => {
+  function setup(title = 'My note') {
+    const fetch = mockFetch({
+      'GET /api/tree': treeWith(title),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Body'), title) } },
+      [`PATCH /api/notes/${NOTE_ID}`]: (req) => ({ body: { note: summary((req.body as { title: string }).title) } }),
+    })
+    return { ...fetch, ...renderPane() }
+  }
+
+  it('saves the title through PATCH /api/notes/:id {title} on blur, not through autosave', async () => {
+    const { requests, client, unmount } = setup()
+    await findEditor()
+    const user = userEvent.setup()
+    const input = screen.getByLabelText('Note title')
+    await user.clear(input)
+    await user.type(input, 'Renamed')
+    expect(requests.some((r) => r.method === 'PATCH')).toBe(false)
+    await user.tab()
+
+    await waitFor(() => expect(requests.filter((r) => r.method === 'PATCH')).toHaveLength(1))
+    const patch = requests.find((r) => r.method === 'PATCH')!
+    expect(patch.path).toBe(`/api/notes/${NOTE_ID}`)
+    expect(patch.body).toEqual({ title: 'Renamed' })
+    // the sidebar's tree shows the new title at once
+    expect(client.getQueryData<TreeData>(treeQueryKey)!.notes[0]!.title).toBe('Renamed')
+    // a title change is never sent as content: nothing is pending, and closing the note (which
+    // flushes pending content without waiting for the debounce) sends no content save
+    expect(screen.getByRole('status', { name: 'Save status' })).toHaveTextContent('Saved')
+    unmount()
+    await Promise.resolve()
+    expect(requests.some((r) => r.method === 'PUT')).toBe(false)
+  })
+
+  it('Enter saves and moves to the content; Escape cancels; an unchanged title sends nothing', async () => {
+    const { requests } = setup()
+    const editor = await findEditor()
+    const user = userEvent.setup()
+    const input = screen.getByLabelText('Note title')
+
+    await user.click(input)
+    await user.type(input, ' draft{Escape}')
+    expect(input).toHaveValue('My note')
+    await user.tab()
+    expect(requests.some((r) => r.method === 'PATCH')).toBe(false)
+
+    await user.click(input)
+    await user.type(input, '!{Enter}')
+    await waitFor(() => expect(requests.find((r) => r.method === 'PATCH')?.body).toEqual({ title: 'My note!' }))
+    await waitFor(() => expect(document.activeElement).toBe(editor.view.dom))
+  })
+
+  it('shows a rename made in the sidebar while the note is open', async () => {
+    const { client } = setup()
+    await findEditor()
+    await waitFor(() => expect(client.getQueryData(treeQueryKey)).toBeDefined())
+    act(() =>
+      client.setQueryData<TreeData>(treeQueryKey, (tree) => ({
+        ...tree!,
+        notes: tree!.notes.map((n) => ({ ...n, title: 'Renamed in sidebar' })),
+      })),
+    )
+    await waitFor(() => expect(screen.getByLabelText('Note title')).toHaveValue('Renamed in sidebar'))
+  })
+
+  it('a title being edited is saved when the note is closed', async () => {
+    const { requests, unmount } = setup()
+    await findEditor()
+    await userEvent.type(screen.getByLabelText('Note title'), ' 2')
+    unmount()
+    await waitFor(() => expect(requests.find((r) => r.method === 'PATCH')?.body).toEqual({ title: 'My note 2' }))
+  })
+})
+
+describe('image upload', () => {
+  function setup(content: JSONContent = text('Body')) {
+    const aids = [AID, AID2]
+    const fetch = mockFetch({
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(content) } },
+      'POST /api/attachments': (req) => uploadedResponse(req, aids),
+      [`PUT /api/notes/${NOTE_ID}/content`]: { body: { version: 2 } },
+    })
+    return { ...fetch, ...renderPane() }
+  }
+
+  it('the toolbar button uploads to POST /api/attachments and inserts attachment://<aid>, displayed via the owner URL', async () => {
+    const { requests } = setup()
+    const editor = await findEditor()
+    const user = userEvent.setup()
+    await user.upload(screen.getByTestId('image-file-input'), png())
+
+    await waitFor(() => expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`]))
+    const upload = requests.find((r) => r.path === '/api/attachments')!
+    expect(upload.method).toBe('POST')
+    expect(upload.body).toBeInstanceOf(FormData)
+    expect((upload.body as FormData).get('file')).toBeInstanceOf(File)
+    expect(editor.view.dom.querySelector('img')!.getAttribute('src')).toBe(`/api/attachments/${AID}`)
+
+    // the saved content carries the reference, never the private route
+    await waitFor(() => expect(requests.some((r) => r.method === 'PUT')).toBe(true), { timeout: 3000 })
+    const saved = JSON.stringify(requests.find((r) => r.method === 'PUT')!.body)
+    expect(saved).toContain(`attachment://${AID}`)
+    expect(saved).not.toContain('/api/attachments')
+  })
+
+  it('pasting an image file uploads and inserts it', async () => {
+    setup()
+    const editor = await findEditor()
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [png()])))
+    await waitFor(() => expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`]))
+  })
+
+  it('dropping image files uploads them and inserts them at the drop point in order', async () => {
+    setup(doc({ type: 'paragraph', content: [{ type: 'text', text: 'first' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'second' }] }))
+    const editor = await findEditor()
+    // jsdom has no layout: report the drop as landing between the two paragraphs
+    const between = editor.state.doc.child(0).nodeSize
+    editor.view.posAtCoords = () => ({ pos: between, inside: -1 })
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('drop', [png('a.png'), png('b.png')])))
+
+    await waitFor(() => expect(imageSrcs(editor.getJSON())).toHaveLength(2))
+    expect(editor.getJSON().content!.map((n) => n.type)).toEqual(['paragraph', 'image', 'image', 'paragraph'])
+    expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`, `attachment://${AID2}`])
+  })
+
+  it('rejects unsupported or oversized files before uploading', async () => {
+    const { requests } = setup()
+    const editor = await findEditor()
+    const svg = new File(['<svg/>'], 'x.svg', { type: 'image/svg+xml' })
+    const huge = new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'big.png', { type: 'image/png' })
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [svg, huge])))
+
+    expect(await screen.findByText(/x\.svg is not a PNG, JPEG, WebP or GIF image/)).toBeInTheDocument()
+    expect(await screen.findByText(/big\.png is larger than 10 MB/)).toBeInTheDocument()
+    expect(requests.some((r) => r.path === '/api/attachments')).toBe(false)
+    expect(imageSrcs(editor.getJSON())).toEqual([])
+  })
+
+  it('a failed upload shows an error and inserts nothing', async () => {
+    mockFetch({
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Body')) } },
+      'POST /api/attachments': {
+        status: 415,
+        body: { error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Only PNG, JPEG, WebP and GIF images are allowed' } },
+      },
+    })
+    renderPane()
+    const editor = await findEditor()
+    fireEvent.change(screen.getByTestId('image-file-input'), { target: { files: [png()] } })
+    expect(await screen.findByText(/Could not upload cat\.png: Only PNG/)).toBeInTheDocument()
+    expect(imageSrcs(editor.getJSON())).toEqual([])
+  })
+
+  it.each([
+    [429, 'RATE_LIMITED', 'Too many image uploads, try again in a few minutes'],
+    [413, 'QUOTA_EXCEEDED', 'Image storage is full (1024 MB per account). Remove images you no longer need'],
+  ])('a %i %s response stops the batch with one message naming the skipped files', async (status, code, message) => {
+    const { requests } = mockFetch({
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Body')) } },
+      'POST /api/attachments': { status, body: { error: { code, message } } },
+    })
+    renderPane()
+    const editor = await findEditor()
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [png('a.png'), png('b.png'), png('c.png')])))
+
+    expect(await screen.findByText(`Could not upload a.png: ${message} (2 more not uploaded)`)).toBeInTheDocument()
+    expect(requests.filter((r) => r.path === '/api/attachments')).toHaveLength(1)
+    expect(screen.queryByText(/Could not upload b\.png/)).not.toBeInTheDocument()
+    expect(imageSrcs(editor.getJSON())).toEqual([])
+  })
+})
+
+describe('upload file checks', () => {
+  it('routes by type first, then by extension; anything else is unsupported', () => {
+    expect(uploadKindOf(png())).toBe('image')
+    expect(uploadKindOf(pdf())).toBe('pdf')
+    expect(uploadKindOf(pdf('scan.PDF', ''))).toBe('pdf')
+    expect(uploadKindOf(pdf('noext', 'application/pdf'))).toBe('pdf')
+    expect(uploadKindOf(gpx('ride.gpx', ''))).toBe('gpx')
+    expect(uploadKindOf(gpx('ride.GPX', 'application/octet-stream'))).toBe('gpx')
+    expect(uploadKindOf(gpx('ride.gpx', 'application/gpx+xml'))).toBe('gpx')
+    expect(uploadKindOf(new File(['x'], 'notes.docx', { type: 'application/msword' }))).toBeNull()
+    expect(uploadKindOf(new File(['x'], '.gpx', { type: '' }))).toBeNull()
+    expect(uploadKindOf(new File(['<svg/>'], 'x.svg', { type: 'image/svg+xml' }))).toBeNull()
+  })
+
+  it('applies the per-kind size limits', () => {
+    expect(checkUploadFile(sized(png(), MAX_IMAGE_BYTES))).toBeNull()
+    expect(checkUploadFile(sized(png(), MAX_IMAGE_BYTES + 1))).toBe('cat.png is larger than 10 MB')
+    expect(checkUploadFile(sized(pdf(), MAX_IMAGE_BYTES + 1))).toBeNull()
+    expect(checkUploadFile(sized(pdf(), MAX_FILE_BYTES))).toBeNull()
+    expect(checkUploadFile(sized(pdf(), MAX_FILE_BYTES + 1))).toBe('guide.pdf is larger than 25 MB')
+    expect(checkUploadFile(sized(gpx(), MAX_FILE_BYTES))).toBeNull()
+    expect(checkUploadFile(sized(gpx(), MAX_FILE_BYTES + 1))).toBe('track.gpx is larger than 25 MB')
+  })
+})
+
+describe('file attachments', () => {
+  function setup(content: JSONContent = text('Body')) {
+    const aids = [AID, AID2]
+    const fetch = mockFetch({
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(content) } },
+      'POST /api/attachments': (req) => uploadedResponse(req, aids),
+      [`PUT /api/notes/${NOTE_ID}/content`]: { body: { version: 2 } },
+    })
+    return { ...fetch, ...renderPane() }
+  }
+
+  it('the toolbar "Attach file" button opens a file input that accepts PDF and GPX by type and extension', async () => {
+    setup()
+    await findEditor()
+    const input = screen.getByTestId('attach-file-input')
+    // the MIME types keep GPX pickable on iOS, which has no system type for the .gpx extension
+    expect(input).toHaveAttribute('accept', 'application/pdf,application/gpx+xml,.pdf,.gpx')
+    expect(input).toHaveAttribute('multiple')
+    const click = vi.spyOn(input, 'click')
+    await userEvent.click(screen.getByRole('button', { name: 'Attach file' }))
+    expect(click).toHaveBeenCalledTimes(1)
+  })
+
+  it('a picked PDF uploads and inserts a pdf file node with its name and size, and mounts the viewer', async () => {
+    const { requests } = setup()
+    const editor = await findEditor()
+    const file = pdf()
+    await userEvent.setup({ applyAccept: false }).upload(screen.getByTestId('attach-file-input'), file)
+
+    await waitFor(() =>
+      expect(fileNodes(editor.getJSON())).toEqual([
+        { src: `attachment://${AID}`, name: 'guide.pdf', size: file.size, kind: 'pdf' },
+      ]),
+    )
+    expect(((requests.find((r) => r.path === '/api/attachments')!.body as FormData).get('file') as File).name).toBe(
+      'guide.pdf',
+    )
+    expect(imageSrcs(editor.getJSON())).toEqual([])
+    expect(vi.mocked(mountPdfViewer)).toHaveBeenCalledWith(expect.any(HTMLElement), AID, expect.any(Function), expect.any(Function))
+  })
+
+  it("a PDF preview failing with an expired session signs the user out; any other preview failure does not", async () => {
+    vi.mocked(mountPdfViewer).mockClear()
+    const { client } = setup(doc(fileNode(`attachment://${AID}`, { name: 'guide.pdf', kind: 'pdf' })))
+    client.setQueryData(meQueryKey, testUser)
+    await findEditor()
+    const onPreviewError = vi.mocked(mountPdfViewer).mock.calls.at(-1)![3]!
+
+    onPreviewError(new ApiError(404, 'NOT_FOUND', 'Attachment not found'))
+    onPreviewError(new Error('Invalid PDF structure'))
+    expect(client.getQueryData(meQueryKey)).toEqual(testUser)
+
+    onPreviewError(new ApiError(401, 'UNAUTHORIZED', 'Authentication required'))
+    expect(client.getQueryData(meQueryKey)).toBeNull()
+  })
+
+  it.each([
+    ['an empty type', ''],
+    ['application/octet-stream', 'application/octet-stream'],
+  ])('a .gpx file with %s inserts a gpx file node', async (_label, type) => {
+    setup()
+    const editor = await findEditor()
+    await userEvent.setup({ applyAccept: false }).upload(screen.getByTestId('attach-file-input'), gpx('ride.gpx', type))
+    await waitFor(() =>
+      expect(fileNodes(editor.getJSON())).toEqual([
+        { src: `attachment://${AID}`, name: 'ride.gpx', size: 25, kind: 'gpx' },
+      ]),
+    )
+    expect(editor.view.dom.querySelector('[data-role="pdf-viewer"]')).toBeNull()
+  })
+
+  it('an image picked through any input still becomes an image node', async () => {
+    setup()
+    const editor = await findEditor()
+    fireEvent.change(screen.getByTestId('attach-file-input'), { target: { files: [png()] } })
+    await waitFor(() => expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`]))
+    expect(fileNodes(editor.getJSON())).toEqual([])
+  })
+
+  it('pasting a PDF and a GPX uploads both and inserts file nodes', async () => {
+    setup()
+    const editor = await findEditor()
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [pdf(), gpx()])))
+    await waitFor(() => expect(fileNodes(editor.getJSON()).map((n) => n.kind)).toEqual(['pdf', 'gpx']))
+    expect(fileNodes(editor.getJSON()).map((n) => n.src)).toEqual([`attachment://${AID}`, `attachment://${AID2}`])
+  })
+
+  it("a file node is named with the server's stored name, which ends in the detected kind's extension", async () => {
+    setup()
+    const editor = await findEditor()
+    // PDF bytes named .exe (declared as PDF), GPX bytes named .xml (declared as GPX)
+    const files = [pdf('Route guide.exe'), gpx('ridge.xml', 'application/gpx+xml')]
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', files)))
+    await waitFor(() => expect(fileNodes(editor.getJSON())).toHaveLength(2))
+    expect(fileNodes(editor.getJSON()).map((n) => n.name)).toEqual(['Route guide.exe.pdf', 'ridge.xml.gpx'])
+  })
+
+  it('dropping a mixed batch inserts image and file nodes at the drop point in order', async () => {
+    setup(doc({ type: 'paragraph', content: [{ type: 'text', text: 'first' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'second' }] }))
+    const editor = await findEditor()
+    const between = editor.state.doc.child(0).nodeSize
+    editor.view.posAtCoords = () => ({ pos: between, inside: -1 })
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('drop', [png('a.png'), gpx('b.gpx')])))
+
+    await waitFor(() => expect(editor.getJSON().content!.map((n) => n.type)).toEqual(['paragraph', 'image', 'attachmentFile', 'paragraph']))
+    expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`])
+    expect(fileNodes(editor.getJSON())[0]).toMatchObject({ src: `attachment://${AID2}`, kind: 'gpx', name: 'b.gpx' })
+  })
+
+  it('attachments inserted one after another at the end of the note never replace each other', async () => {
+    setup()
+    const editor = await findEditor()
+    const user = userEvent.setup({ applyAccept: false })
+    // the cursor at the end of the last paragraph: each inserted block ends up selected
+    act(() => void editor.commands.setTextSelection(editor.state.doc.content.size - 1))
+    await user.upload(screen.getByTestId('image-file-input'), png())
+    await waitFor(() => expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`]))
+    await user.upload(screen.getByTestId('attach-file-input'), pdf())
+
+    await waitFor(() => expect(fileNodes(editor.getJSON())).toHaveLength(1))
+    // the file goes after the image (the editor may add an empty paragraph after a trailing block)
+    expect(editor.getJSON().content!.map((n) => n.type).filter((t) => t !== 'paragraph')).toEqual(['image', 'attachmentFile'])
+    expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`])
+    expect(fileNodes(editor.getJSON())[0]).toMatchObject({ src: `attachment://${AID2}`, kind: 'pdf' })
+  })
+
+  it('an unsupported or oversized file shows a clear message and is not uploaded', async () => {
+    const { requests } = setup()
+    const editor = await findEditor()
+    const docx = new File(['x'], 'notes.docx', { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+    const huge = sized(pdf('huge.pdf'), MAX_FILE_BYTES + 1)
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [docx, huge])))
+
+    expect(
+      await screen.findByText('notes.docx is not a supported file: attach PNG, JPEG, WebP or GIF images, PDF or GPX files'),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('huge.pdf is larger than 25 MB')).toBeInTheDocument()
+    expect(requests.some((r) => r.path === '/api/attachments')).toBe(false)
+    expect(fileNodes(editor.getJSON())).toEqual([])
+  })
+
+  it.each([
+    [429, 'RATE_LIMITED', 'Too many uploads, try again in a few minutes'],
+    [413, 'QUOTA_EXCEEDED', 'Attachment storage is full'],
+  ])('a %i %s response stops a mixed batch with one message', async (status, code, message) => {
+    let calls = 0
+    const { requests } = mockFetch({
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Body')) } },
+      'POST /api/attachments': () =>
+        ++calls === 1
+          ? { status: 201, body: { id: AID, kind: 'pdf', mime: 'application/pdf', size: 9, name: 'a.pdf' } }
+          : { status, body: { error: { code, message } } },
+    })
+    renderPane()
+    const editor = await findEditor()
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [pdf('a.pdf'), gpx('b.gpx'), png('c.png')])))
+
+    expect(await screen.findByText(`Could not upload b.gpx: ${message} (1 more not uploaded)`)).toBeInTheDocument()
+    expect(requests.filter((r) => r.path === '/api/attachments')).toHaveLength(2)
+    expect(screen.queryByText(/Could not upload c\.png/)).not.toBeInTheDocument()
+    expect(fileNodes(editor.getJSON()).map((n) => n.kind)).toEqual(['pdf'])
+    expect(imageSrcs(editor.getJSON())).toEqual([])
+  })
+
+  it.each([
+    ['a PDF named .png (declared as PNG)', () => new File(['%PDF-1.7\n'], 'scan.png', { type: 'image/png' }), 'pdf'],
+    ['a GPX named .pdf', () => new File(['<gpx version="1.1"></gpx>'], 'track.pdf', { type: 'application/pdf' }), 'gpx'],
+    ['a PDF named .gpx', () => new File(['%PDF-1.7\n'], 'route.gpx', { type: '' }), 'pdf'],
+  ])('builds the node from the kind the server detected: %s', async (_label, makeFile, kind) => {
+    setup()
+    const editor = await findEditor()
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [makeFile()])))
+    await waitFor(() => expect(fileNodes(editor.getJSON()).map((n) => n.kind)).toEqual([kind]))
+    expect(imageSrcs(editor.getJSON())).toEqual([])
+  })
+
+  it('a PNG named .pdf becomes an image node, not a PDF viewer', async () => {
+    vi.mocked(mountPdfViewer).mockClear()
+    setup()
+    const editor = await findEditor()
+    const renamed = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'photo.pdf', { type: 'application/pdf' })
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [renamed])))
+    await waitFor(() => expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID}`]))
+    expect(fileNodes(editor.getJSON())).toEqual([])
+    expect(vi.mocked(mountPdfViewer)).not.toHaveBeenCalled()
+  })
+
+  it('a file inserted while the user has an image selected goes after it instead of replacing it', async () => {
+    const image = { type: 'image', attrs: { src: `attachment://${AID2}` } }
+    setup(doc({ type: 'paragraph', content: [{ type: 'text', text: 'first' }] }, image, { type: 'paragraph', content: [{ type: 'text', text: 'last' }] }))
+    const editor = await findEditor()
+    let imagePos = -1
+    editor.state.doc.forEach((node, offset) => {
+      if (node.type.name === 'image') imagePos = offset
+    })
+    act(() => void editor.commands.setNodeSelection(imagePos))
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [pdf()])))
+
+    await waitFor(() => expect(fileNodes(editor.getJSON())).toHaveLength(1))
+    expect(editor.getJSON().content!.map((n) => n.type)).toEqual(['paragraph', 'image', 'attachmentFile', 'paragraph'])
+    expect(imageSrcs(editor.getJSON())).toEqual([`attachment://${AID2}`])
+  })
+
+  describe('owner download', () => {
+    beforeEach(() => {
+      let n = 0
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        writable: true,
+        value: vi.fn(() => `blob:http://localhost/${++n}`),
+      })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, writable: true, value: vi.fn() })
+    })
+    afterEach(() => {
+      delete (URL as { createObjectURL?: unknown }).createObjectURL
+      delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL
+    })
+
+    const gpxDoc = doc({ type: 'attachmentFile', attrs: { src: `attachment://${AID}`, name: 'ride.gpx', size: 2048, kind: 'gpx' } })
+
+    function captureDownloads() {
+      const clicked: { href: string; download: string; connected: boolean }[] = []
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+        clicked.push({ href: this.getAttribute('href')!, download: this.download, connected: this.isConnected })
+      })
+      return clicked
+    }
+
+    function setupDownload(response: MockResponse) {
+      const fetch = mockFetch({
+        'GET /api/tree': treeWith(),
+        [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(gpxDoc) } },
+        [`GET /api/attachments/${AID}`]: response,
+      })
+      return { ...fetch, ...renderPane() }
+    }
+
+    it("the chip's Download fetches the owner route with the session and saves the bytes under the stored name", async () => {
+      const clicked = captureDownloads()
+      const { requests } = setupDownload({
+        body: '<gpx/>',
+        headers: { 'content-type': 'application/gpx+xml', 'content-disposition': `attachment; filename="Ridge.gpx"; filename*=UTF-8''Ridge.gpx` },
+      })
+      await findEditor()
+      await userEvent.click(await screen.findByRole('button', { name: 'Download ride.gpx' }))
+
+      await waitFor(() => expect(clicked).toEqual([{ href: 'blob:http://localhost/1', download: 'Ridge.gpx', connected: true }]))
+      const get = requests.find((r) => r.path === `/api/attachments/${AID}`)!
+      expect(get.init.credentials).toBe('same-origin')
+      // a file download does not ask for JSON
+      expect((get.init.headers as Record<string, string>).accept).toBeUndefined()
+      // the saved blob is opaque bytes, and the anchor is temporary
+      expect((vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob).type).toBe('application/octet-stream')
+      expect(document.querySelector('a[href^="blob:"]')).toBeNull()
+    })
+
+    it.each([
+      ['an image (a file node pointing at an image attachment named x.js)', { body: 'GIF89a', headers: { 'content-type': 'image/gif', 'content-disposition': `inline; filename="x.js.gif"; filename*=UTF-8''x.js.gif` } }],
+      ['a GPX without Content-Disposition', { body: '<gpx/>', headers: { 'content-type': 'application/gpx+xml' } }],
+      ['a GPX named x.js', { body: '<gpx/>', headers: { 'content-type': 'application/gpx+xml', 'content-disposition': `attachment; filename="x.js"` } }],
+    ])('a response that is %s is refused with an error, never saved under the node name', async (_name, response) => {
+      const clicked = captureDownloads()
+      setupDownload(response)
+      await findEditor()
+      await userEvent.click(await screen.findByRole('button', { name: 'Download ride.gpx' }))
+
+      expect(await screen.findByText('Could not download ride.gpx: it is not a PDF or GPX file')).toBeInTheDocument()
+      expect(clicked).toEqual([])
+      expect(URL.createObjectURL).not.toHaveBeenCalled()
+    })
+
+    it('a failed download shows an error instead of saving the error body', async () => {
+      const clicked = captureDownloads()
+      setupDownload({ status: 404, body: { error: { code: 'NOT_FOUND', message: 'Attachment not found' } } })
+      await findEditor()
+      await userEvent.click(await screen.findByRole('button', { name: 'Download ride.gpx' }))
+
+      expect(await screen.findByText('Could not download ride.gpx: Attachment not found')).toBeInTheDocument()
+      expect(clicked).toEqual([])
+      expect(URL.createObjectURL).not.toHaveBeenCalled()
+    })
+
+    it('an expired session reports the failure and signs the user out', async () => {
+      const clicked = captureDownloads()
+      const { client } = setupDownload(unauthorizedResponse)
+      client.setQueryData(meQueryKey, testUser)
+      await findEditor()
+      await userEvent.click(await screen.findByRole('button', { name: 'Download ride.gpx' }))
+
+      expect(await screen.findByText(/Could not download ride\.gpx: Authentication required/)).toBeInTheDocument()
+      expect(client.getQueryData(meQueryKey)).toBeNull()
+      expect(clicked).toEqual([])
+    })
+  })
+})

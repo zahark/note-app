@@ -1,1 +1,28 @@
 .revmux/
+
+# dependencies and build output
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+coverage/
+test-results/
+playwright-report/
+blob-report/
+
+# local data and secrets
+.env
+.env.*
+!.env.example
+data/
+
+# logs
+*.log
+npm-debug.log*
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.sw?
