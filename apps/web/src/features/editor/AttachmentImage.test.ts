@@ -1,8 +1,8 @@
 import { Editor, type JSONContent } from '@tiptap/core'
-import { NodeSelection, TextSelection } from '@tiptap/pm/state'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { attachmentSrc, parseAttachmentSrc, type AttachmentResolver } from './AttachmentImage'
 import { editorExtensions } from './extensions'
+import { copyNodeAt, firstNodePos, pasteAtEnd } from '@/test/clipboard'
 
 const AID = '0b4c2f7e-1d2a-4c3b-9e8f-0123456789ab'
 const OTHER_AID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
@@ -41,47 +41,11 @@ function imageSrcs(json: JSONContent): string[] {
   return out
 }
 
-/** A minimal DataTransfer stand-in: ProseMirror only uses get/set/clearData on copy and paste. */
-function fakeClipboard() {
-  const data = new Map<string, string>()
-  return {
-    data,
-    clipboardData: {
-      getData: (type: string) => data.get(type) ?? '',
-      setData: (type: string, value: string) => void data.set(type, value),
-      clearData: () => data.clear(),
-      files: [] as File[],
-      items: [] as DataTransferItem[],
-      types: [] as string[],
-    },
-  }
-}
-
-function clipboardEvent(type: 'copy' | 'cut' | 'paste', clipboardData: unknown): Event {
-  const event = new Event(type, { bubbles: true, cancelable: true })
-  Object.defineProperty(event, 'clipboardData', { value: clipboardData })
-  return event
-}
-
 /** Selects the first image node and copies it the way the browser does (a `copy` event on the editor). */
 function copyFirstImage(editor: Editor): Map<string, string> {
-  let pos = -1
-  editor.state.doc.descendants((node, p) => {
-    if (pos < 0 && node.type.name === 'image') pos = p
-  })
+  const pos = firstNodePos(editor, 'image')
   expect(pos).toBeGreaterThanOrEqual(0)
-  editor.view.dispatch(editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, pos)))
-  const { data, clipboardData } = fakeClipboard()
-  editor.view.dom.dispatchEvent(clipboardEvent('copy', clipboardData))
-  return data
-}
-
-/** Puts the cursor at the end of the document and pastes the clipboard contents. */
-function pasteAtEnd(editor: Editor, data: Map<string, string>) {
-  editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)))
-  const { data: target, clipboardData } = fakeClipboard()
-  for (const [type, value] of data) target.set(type, value)
-  editor.view.dom.dispatchEvent(clipboardEvent('paste', clipboardData))
+  return copyNodeAt(editor, pos)
 }
 
 describe('parseAttachmentSrc', () => {
@@ -189,13 +153,7 @@ describe('AttachmentImage HTML (clipboard)', () => {
 
   it('cut + paste moves the reference', () => {
     const editor = makeEditor(doc(paragraph('a'), image(attachmentSrc(AID)), paragraph('b')))
-    let pos = -1
-    editor.state.doc.descendants((node, p) => {
-      if (node.type.name === 'image') pos = p
-    })
-    editor.view.dispatch(editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, pos)))
-    const { data, clipboardData } = fakeClipboard()
-    editor.view.dom.dispatchEvent(clipboardEvent('cut', clipboardData))
+    const data = copyNodeAt(editor, firstNodePos(editor, 'image'), 'cut')
     expect(imageSrcs(editor.getJSON())).toEqual([])
 
     pasteAtEnd(editor, data)

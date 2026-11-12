@@ -87,10 +87,10 @@
 - Create: `apps/web/src/features/editor/AttachmentFile.ts`, `apps/web/src/features/editor/AttachmentFile.test.ts`
 - Modify: `apps/web/src/features/editor/extensions.ts`, `apps/web/src/features/editor/AttachmentImage.ts` (share the scheme/parse helpers if needed, without changing image behaviour)
 
-- [ ] write tests: `getJSON()` keeps `attachment://<aid>` and the name/size/kind attrs; `renderHTML` (clipboard) has `data-attachment-id` and never a resolved URL; copy/paste within and across editors keeps the node; a pasted file block without an `attachment://` reference is dropped; name/size are rendered as text, not HTML
-- [ ] write tests: GPX chip shows name and size and a Download control that uses the supplied download handler; PDF chip shows the same plus a viewer slot
-- [ ] implement the node (block, atom, draggable) with a node view and options `{ resolveAttachment, downloadAttachment }`
-- [ ] run tests — must pass before task 4
+- [x] write tests: `getJSON()` keeps `attachment://<aid>` and the name/size/kind attrs; `renderHTML` (clipboard) has `data-attachment-id` and never a resolved URL; copy/paste within and across editors keeps the node; a pasted file block without an `attachment://` reference is dropped; name/size are rendered as text, not HTML
+- [x] write tests: GPX chip shows name and size and a Download control that uses the supplied download handler; PDF chip shows the same plus a viewer slot
+- [x] implement the node (block, atom, draggable) with a node view and options `{ resolveAttachment, downloadAttachment }`
+- [x] run tests — must pass before task 4
 
 ### Task 4: PDF viewer
 

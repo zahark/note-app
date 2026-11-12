@@ -2,11 +2,14 @@ import type { Extensions, JSONContent } from '@tiptap/core'
 import { TaskItem, TaskList } from '@tiptap/extension-list'
 import { Placeholder } from '@tiptap/extensions'
 import StarterKit from '@tiptap/starter-kit'
+import { AttachmentFile, type AttachmentDownloader } from './AttachmentFile'
 import { AttachmentImage, type AttachmentResolver } from './AttachmentImage'
 
 export interface EditorExtensionOptions {
-  /** Maps `attachment://<aid>` to a loadable URL inside the image node view. */
+  /** Maps `attachment://<aid>` to a loadable URL inside the image and file node views. */
   resolveAttachment: AttachmentResolver | null
+  /** Downloads a file attachment (the file node's Download button); without one the button is disabled. */
+  downloadAttachment?: AttachmentDownloader | null
   /** Empty-document hint (editable editors only). */
   placeholder?: string
 }
@@ -14,9 +17,13 @@ export interface EditorExtensionOptions {
 /**
  * The note schema, shared by the owner's editor and the read-only shared view: StarterKit (whose
  * input rules give markdown shortcuts such as `# `, `- `, `1. `, `> `, `**bold**`, and which
- * includes links), task lists (`[ ] `) and `attachment://` images.
+ * includes links), task lists (`[ ] `), `attachment://` images and `attachment://` files (PDF, GPX).
  */
-export function editorExtensions({ resolveAttachment, placeholder }: EditorExtensionOptions): Extensions {
+export function editorExtensions({
+  resolveAttachment,
+  downloadAttachment = null,
+  placeholder,
+}: EditorExtensionOptions): Extensions {
   return [
     StarterKit.configure({
       link: {
@@ -29,6 +36,7 @@ export function editorExtensions({ resolveAttachment, placeholder }: EditorExten
     TaskList,
     TaskItem.configure({ nested: true }),
     AttachmentImage.configure({ resolveAttachment }),
+    AttachmentFile.configure({ resolveAttachment, downloadAttachment }),
     ...(placeholder ? [Placeholder.configure({ placeholder })] : []),
   ]
 }

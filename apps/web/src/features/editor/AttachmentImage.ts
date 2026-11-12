@@ -19,11 +19,14 @@ export function parseAttachmentSrc(src: unknown): string | null {
   return UUID.test(aid) ? aid : null
 }
 
-/** The attachment an `<img>` refers to: our clipboard's `data-attachment-id`, else an `attachment://` src. */
-function elementAttachmentId(element: HTMLElement): string | null {
+/**
+ * The attachment a pasted element refers to: our clipboard's `data-attachment-id`, else an
+ * `attachment://` reference in `srcAttribute` (`src` for an `<img>`).
+ */
+export function elementAttachmentId(element: HTMLElement, srcAttribute = 'src'): string | null {
   const aid = element.getAttribute('data-attachment-id')
   if (aid && UUID.test(aid)) return aid
-  return parseAttachmentSrc(element.getAttribute('src'))
+  return parseAttachmentSrc(element.getAttribute(srcAttribute))
 }
 
 /**
