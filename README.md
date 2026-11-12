@@ -62,6 +62,38 @@ Open `PUBLIC_ORIGIN` (e.g. `http://<host>:3000`) and sign up ("Create one" on th
 first account becomes the owner, and signup then closes (see `ALLOW_SIGNUP`).
 `compose.direct.yml` is for a LAN or testing; see [Docker](#docker) for public deployments.
 
+## Sharing a note
+
+Notes are private until you share them, one note at a time.
+
+1. **Open the note** by clicking it in the sidebar. The **Share** button exists only while a note is open
+   (not on the empty start screen). On a narrow screen the sidebar is a drawer: open it with the ☰
+   button (**Open sidebar**) at the top, then pick the note.
+2. **Click Share** at the top right of the note, on the same row as the title and the "Saved" indicator.
+   Once a note is shared the button reads **Shared**.
+3. **Choose how to share** in the dialog:
+   - **Password (PIN)** → **Create PIN**: you get a link plus an 8-character PIN. **The PIN is shown only
+     once**: copy it right away (the copy buttons sit next to the link and the PIN). Send the link and the
+     PIN to the reader, ideally through different channels (e.g. the link by email, the PIN by text). A
+     PIN share does not expire.
+   - **Expiring link** → pick **1 hour**, **1 day**, **7 days** (the default) or **30 days** → **Create
+     link**: anyone with the link can read the note until it expires; no PIN is needed.
+4. **Later**, open the dialog again to manage the share:
+   - **New PIN** / **New link** replaces the current share; the old PIN or link stops working at once.
+   - **Stop sharing** makes the note private again.
+   - A note is shared one way at a time: creating a link turns off a PIN share and the other way round.
+
+What the reader sees: a read-only page with no sidebar and no editing, where they can view the note
+and its images, page through PDFs and download PDF and GPX files. With a PIN share they first enter the
+PIN; after 5 wrong PINs within 15 minutes the note is locked for a while ("Too many attempts"). A wrong
+PIN, an expired or revoked link and a missing note all show the same "unavailable" page, so a link
+reveals nothing about why it does not work.
+
+The links point at the address the app is served from: use the app through its public address
+(`PUBLIC_ORIGIN`, e.g. `https://notes.example.com`), not `localhost`, so the links you send work for
+other people. (The app accepts changes only from `PUBLIC_ORIGIN` anyway, so this is the address you
+create shares from.)
+
 ## Requirements
 
 - Node.js 22+ (`node -v`). On macOS: `brew install node@22`.
