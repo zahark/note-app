@@ -56,10 +56,15 @@ export const unauthorizedResponse: MockResponse = {
 
 export const testUser = { id: 'u1', email: 'owner@example.com', isOwner: true }
 
-/** Shows the current router location so tests can assert on redirects. */
+/** Shows the current router location (path and query string) so tests can assert on navigation. */
 function LocationProbe() {
   const location = useLocation()
-  return <div data-testid="location">{location.pathname}</div>
+  return (
+    <>
+      <div data-testid="location">{location.pathname}</div>
+      <div data-testid="search">{location.search}</div>
+    </>
+  )
 }
 
 /** Renders the full route table at `path` with a fresh query client. */

@@ -7,6 +7,7 @@ import { LoginPage } from '@/features/auth/LoginPage'
 import { RequireAuth } from '@/features/auth/RequireAuth'
 import { SettingsDialog } from '@/features/auth/SettingsDialog'
 import { SharedNotePage } from '@/features/share/SharedNotePage'
+import { Sidebar } from '@/features/tree/Sidebar'
 import { createQueryClient } from '@/lib/queryClient'
 
 function HomePage() {
@@ -14,8 +15,7 @@ function HomePage() {
     <Layout
       sidebar={
         <>
-          <div className="flex h-12 shrink-0 items-center border-b px-3 font-semibold">Notes</div>
-          <div className="min-h-0 flex-1 overflow-auto p-2" />
+          <Sidebar />
           <div className="border-t p-2">
             <SettingsDialog />
           </div>
