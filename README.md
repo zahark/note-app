@@ -183,11 +183,37 @@ docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run rese
 docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run backup
 ```
 
+### Starting and stopping
+
+Run these from the repository directory, with the same `-f` files you started with (`compose.direct.yml`
+below; use `compose.nginx.yml` or `compose.tunnel.yml` if that is your deployment).
+
+```sh
+docker compose -f docker-compose.yml -f compose.direct.yml up -d --build   # start (rebuild after updating the code)
+docker compose -f docker-compose.yml -f compose.direct.yml logs -f app     # follow the logs
+docker compose -f docker-compose.yml -f compose.direct.yml stop            # pause; `start` resumes the same container
+docker compose -f docker-compose.yml -f compose.direct.yml down            # stop and remove the container and network
+docker kill notes-app-app-1                                                # force-stop immediately
+docker ps                                                                  # what is running
+```
+
+None of these delete your notes: they live in the `notes-data` volume (`notes-app_notes-data` when the
+repository directory is named `notes-app`). Only `down -v` deletes the volume, and that cannot be undone.
+With Colima on a Mac, `colima start` must run first after a reboot (`brew services start colima` starts it
+at login), and `colima stop` frees the VM's memory.
+
 ## Backup and restore
+
+All state is the data directory (`/data` in the container: the SQLite database `notes.db` and the
+`uploads/` folder) plus the secrets in `.env`. Keep a copy of `.env` with your backups: without the same
+`SHARE_HMAC_KEY`, restored expiring share links stop working (see [Moving to another server](#moving-to-another-server)).
+Backups stay on the machine that made them, so copy them elsewhere too (another disk, cloud storage).
+
+### Option A: `npm run backup` (while the app runs)
 
 `npm run backup -- [outDir]` writes a consistent snapshot while the server keeps running:
 `<outDir>/notes-backup-<UTC timestamp>/notes.db` (made with SQLite's online backup API, a standalone
-file) and `uploads.tar.gz` (every uploaded image the database copy references, as `uploads/<name>`).
+file) and `uploads.tar.gz` (every uploaded file the database copy references, as `uploads/<name>`).
 `outDir` defaults to `DATA_DIR/backups`; a relative `outDir` is relative to the directory you run the
 command from.
 
@@ -197,6 +223,8 @@ docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run back
 docker compose -f docker-compose.yml -f compose.direct.yml cp app:/data/backups ./backups
 ```
 
+If the container is not running, start it first (`up -d`), then run the two Docker commands.
+
 Bare metal: the CLIs read `DATA_DIR` only from the environment, not from `.env`, so export the same
 environment as the server first (`set -a; . ./.env; set +a`) or prefix the command with
 `DATA_DIR=/path/to/data`. Otherwise they fall back to `apps/server/data`.
@@ -204,7 +232,21 @@ environment as the server first (`set -a; . ./.env; set +a`) or prefix the comma
 Backups made inside the container land in the `notes-data` volume (`/data/backups`); copy them off the
 host as shown and delete old ones from time to time.
 
-To restore, stop the app, then put the copy back into an empty data directory:
+### Option B: archive the whole volume (while the app is stopped)
+
+An exact copy of everything in `/data`, without starting the app. **Only while the app is stopped**
+(`down` or `stop`): copying the database files while the server writes to them can give an inconsistent
+copy.
+
+```sh
+mkdir -p ~/notes-backups
+docker run --rm -v notes-app_notes-data:/data -v ~/notes-backups:/out node:22-slim \
+  tar -czf /out/notes-data-$(date +%Y%m%d-%H%M).tar.gz -C /data .
+```
+
+### Restore
+
+Stop the app first. Bare metal, from an Option A backup, into the data directory:
 
 ```sh
 rm -f "$DATA_DIR"/notes.db-wal "$DATA_DIR"/notes.db-shm   # never mix a restored db with an old WAL
@@ -212,8 +254,70 @@ cp notes-backup-*/notes.db "$DATA_DIR/notes.db"
 tar -xzf notes-backup-*/uploads.tar.gz -C "$DATA_DIR"   # recreates $DATA_DIR/uploads/
 ```
 
-With Docker, do the same into the volume, e.g. with a one-off container:
-`docker run --rm -v notes-app_notes-data:/data -v "$PWD/notes-backup-XXXX:/backup" --user 1000:1000 node:22-slim sh -c 'rm -f /data/notes.db-wal /data/notes.db-shm && cp /backup/notes.db /data/ && tar -xzf /backup/uploads.tar.gz -C /data'`.
+With Docker, into the volume with a one-off container (`--user 1000:1000`: the app runs as uid 1000 and
+must own its files). From an Option A backup (replace `XXXX` with the backup's timestamp):
+
+```sh
+docker run --rm -v notes-app_notes-data:/data -v "$PWD/backups/notes-backup-XXXX:/backup" --user 1000:1000 node:22-slim \
+  sh -c 'rm -f /data/notes.db-wal /data/notes.db-shm && cp /backup/notes.db /data/ && tar -xzf /backup/uploads.tar.gz -C /data'
+```
+
+From an Option B archive:
+
+```sh
+docker run --rm -v notes-app_notes-data:/data -v ~/notes-backups:/in --user 1000:1000 node:22-slim \
+  sh -c 'tar -xzf /in/notes-data-XXXX.tar.gz -C /data'
+```
+
+Then start the app again.
+
+### Moving to another server
+
+Copy the data and `.env` from the old server, restore into a fresh volume on the new one.
+
+1. **Old server**: stop the app and archive the volume (Option B):
+
+   ```sh
+   cd ~/notes-app
+   docker compose -f docker-compose.yml -f compose.direct.yml down
+   docker run --rm -v notes-app_notes-data:/data -v "$PWD":/out node:22-slim \
+     tar -czf /out/notes-data.tar.gz -C /data .
+   ```
+
+2. **Copy** the archive and `.env` to the new server:
+
+   ```sh
+   scp notes-data.tar.gz .env user@new-server:~/
+   ```
+
+3. **New server**: check out the code, start once to create the (empty) volume, stop, restore, start:
+
+   ```sh
+   git clone <your repo> ~/notes-app && cd ~/notes-app      # keep the directory name notes-app
+   mv ~/.env .
+   docker compose -f docker-compose.yml -f compose.direct.yml up -d --build   # creates notes-app_notes-data
+   docker compose -f docker-compose.yml -f compose.direct.yml down
+   docker run --rm --user 1000:1000 -v notes-app_notes-data:/data -v ~/:/in node:22-slim \
+     sh -c 'tar -xzf /in/notes-data.tar.gz -C /data'
+   docker compose -f docker-compose.yml -f compose.direct.yml up -d
+   ```
+
+4. **Check**: sign in with your existing account; notes, folders and files are all there.
+
+Things that matter when moving:
+
+- **Keep the same `SHARE_HMAC_KEY` and `SESSION_SECRET`** (copy `.env` as is). A different
+  `SHARE_HMAC_KEY` breaks every expiring share link already sent; a different `SESSION_SECRET` only signs
+  everyone out. PIN shares keep working either way.
+- **Domain change**: update `PUBLIC_ORIGIN`. Links already sent still point at the old domain, so share
+  new ones.
+- **Do not sign up on the new server before restoring**: with the default signup mode the first signup
+  becomes the owner, and the restore overwrites it anyway.
+- **Directory name**: Compose names the volume after the directory (`notes-app_notes-data`). If you use
+  another directory name, add `-p notes-app` to every `docker compose` command, or use that name's volume
+  in the `docker run` commands.
+- Use the `-f` override of your deployment (`compose.nginx.yml`, `compose.tunnel.yml`) in place of
+  `compose.direct.yml`, and set `TRUST_PROXY` for the new server's setup (see [Docker](#docker)).
 
 ## Password reset
 
