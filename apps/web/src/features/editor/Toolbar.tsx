@@ -1,6 +1,5 @@
 import type { ComponentType } from 'react'
-import type { Editor } from '@tiptap/react'
-import { useEditorState } from '@tiptap/react'
+import { useEditorState, type Editor } from '@tiptap/react'
 import {
   BoldIcon,
   CodeIcon,
@@ -19,8 +18,8 @@ import {
   StrikethroughIcon,
   Undo2Icon,
 } from 'lucide-react'
+import { cn } from 'cn'
 import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
 
 interface ToolbarProps {
   editor: Editor

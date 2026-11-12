@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { RateLimiter } from '../src/services/ratelimit.js'
+import { AppError } from '../src/errors.js'
+import { RateLimiter } from '../src/services/rateLimiter.js'
 import { FakeClock } from './helpers/auth.js'
 
 const WINDOW = 15 * 60 * 1000
@@ -51,14 +52,6 @@ describe('RateLimiter', () => {
     expect(limiter.retryAfterMs('k')).toBe(WINDOW - 1000)
   })
 
-  it('reset forgets a key', () => {
-    const { limiter } = make(1)
-    limiter.hit('k')
-    expect(limiter.isLimited('k')).toBe(true)
-    limiter.reset('k')
-    expect(limiter.isLimited('k')).toBe(false)
-  })
-
   it('periodically drops keys whose hits all aged out, but never a key that is still limited', () => {
     const { clock, limiter } = make(3)
     for (let i = 0; i < 500; i++) limiter.hit(`old-${i}`)
@@ -69,5 +62,46 @@ describe('RateLimiter', () => {
     for (let i = 0; i < 497; i++) limiter.hit(`new-${i}`)
     expect(heldKeys(limiter)).toBe(1 + 497)
     expect(limiter.isLimited('attacker')).toBe(true)
+  })
+
+  it('enforce throws a 429 with Retry-After once the key is limited, and records each allowed attempt', () => {
+    const { limiter } = make(2)
+    limiter.enforce('k', 'slow down')
+    limiter.enforce('k', 'slow down')
+    expect(limiter.count('k')).toBe(2)
+    let thrown: unknown
+    try {
+      limiter.enforce('k', 'slow down')
+    } catch (err) {
+      thrown = err
+    }
+    expect(thrown).toBeInstanceOf(AppError)
+    expect(thrown).toMatchObject({ statusCode: 429, code: 'RATE_LIMITED', message: 'slow down' })
+    expect((thrown as AppError).headers['retry-after']).toBe(String(WINDOW / 1000))
+    // a refused attempt is not recorded
+    expect(limiter.count('k')).toBe(2)
+  })
+
+  it('check does not record a hit', () => {
+    const { limiter } = make(1)
+    limiter.check('k', 'slow down')
+    limiter.check('k', 'slow down')
+    expect(limiter.count('k')).toBe(0)
+  })
+
+  it('reservations count towards the limit until released, without becoming hits', () => {
+    const { limiter } = make(2)
+    limiter.hit('k')
+    limiter.reserve('k')
+    expect(limiter.isLimited('k')).toBe(true)
+    expect(() => limiter.check('k', 'slow down')).toThrow('slow down')
+    expect(limiter.isLimited('other')).toBe(false)
+    limiter.release('k')
+    expect(limiter.isLimited('k')).toBe(false)
+    expect(limiter.count('k')).toBe(1)
+    // releasing more than was reserved never goes negative
+    limiter.release('k')
+    limiter.reserve('k')
+    expect(limiter.isLimited('k')).toBe(true)
   })
 })

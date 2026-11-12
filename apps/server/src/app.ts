@@ -2,6 +2,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import fastifyStatic from '@fastify/static'
 import Fastify, {
+  type FastifyError,
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
@@ -9,22 +10,23 @@ import Fastify, {
 } from 'fastify'
 import type { Config, TrustProxy } from './config.js'
 import type { Db } from './db/index.js'
-import { errorBody, errorHandler } from './errors.js'
+import { errorBody, errorHandler, notFound } from './errors.js'
 import { registerSession } from './plugins/session.js'
 import { attachmentRoutes } from './routes/attachments.js'
 import { authRoutes } from './routes/auth.js'
 import { folderRoutes } from './routes/folders.js'
 import { noteRoutes } from './routes/notes.js'
 import { shareRoutes } from './routes/share.js'
-import { sharedApiHeaders, sharedRoutes } from './routes/shared.js'
+import { SHARED_API_URL, sharedApiHeaders, sharedApiHeaderValues, sharedRoutes } from './routes/shared.js'
 import { treeRoutes } from './routes/tree.js'
-import { sweepAttachments } from './services/attachments.js'
+import { sweepAttachments, type SweepResult } from './services/attachments.js'
 import { AuthService } from './services/auth.js'
 import { ipKey } from './services/ipKey.js'
 import type { HashLimiter } from './services/hashLimiter.js'
 import type { PasswordHasher } from './services/password.js'
-import type { Clock } from './services/ratelimit.js'
-import { ShareService } from './services/share.js'
+import type { Clock } from './services/rateLimiter.js'
+import { ShareService, unavailable } from './services/share.js'
+import { DAY_MS } from './units.js'
 
 export interface BuildAppOptions {
   config: Config
@@ -61,7 +63,22 @@ const SHARED_PAGE_URL = /^\/shared(?:[/?]|$)/
 const SPA_INDEX = 'index.html'
 
 /** How often the attachment sweep runs after the boot-time run. */
-export const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
+export const SWEEP_INTERVAL_MS = DAY_MS
+
+/**
+ * Content-Security-Policy for the web app's pages (defense in depth: the shared page renders content
+ * written by other users). Scripts, styles and images come from this origin only; attachment images are
+ * shown through `blob:` URLs; inline styles are allowed for the UI libraries' positioning.
+ */
+export const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "img-src 'self' blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+].join('; ')
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -99,7 +116,11 @@ export function buildApp({
   attachmentSweep = false,
   webDir,
 }: BuildAppOptions): FastifyInstance {
-  const app = Fastify({ logger, trustProxy: fastifyTrustProxy(config.trustProxy) })
+  const app = Fastify({
+    logger,
+    trustProxy: fastifyTrustProxy(config.trustProxy),
+    frameworkErrors: routerErrorHandler,
+  })
 
   app.decorate('config', config)
   app.decorate('db', db)
@@ -127,8 +148,8 @@ export function buildApp({
   // private, owner-scoped API: each plugin installs the auth guard on its own routes
   app.register(treeRoutes)
   app.register(folderRoutes)
-  app.register(noteRoutes)
-  app.register(attachmentRoutes)
+  app.register(noteRoutes, { now: auth.now })
+  app.register(attachmentRoutes, { now: auth.now })
   app.register(shareRoutes)
   // public shared API: no session, a share token or signed link is the only credential
   app.register(sharedRoutes)
@@ -140,6 +161,24 @@ export function buildApp({
 
 function sendNotFound(reply: FastifyReply): FastifyReply {
   return reply.status(404).send(errorBody('NOT_FOUND', 'Not found'))
+}
+
+/**
+ * Errors the router raises before any route or the error handler runs (a path param over Fastify's
+ * 100-char limit, a malformed URL). They get the standard `{error:{code,message}}` body instead of
+ * Fastify's own: an over-long id is just an id that does not exist (404; on the public shared API the
+ * identical "unavailable" response).
+ */
+function routerErrorHandler(err: FastifyError, request: FastifyRequest, reply: FastifyReply): void {
+  // hooks do not run for these responses, so the shared API's privacy headers are added here
+  const shared = SHARED_API_URL.test(request.url)
+  const headers = shared ? sharedApiHeaderValues : {}
+  if (err.code !== 'FST_ERR_MAX_PARAM_LENGTH') {
+    reply.status(400).headers(headers).send(errorBody('BAD_REQUEST', 'Malformed URL'))
+    return
+  }
+  const e = shared ? unavailable() : notFound()
+  reply.status(e.statusCode).headers(headers).send(errorBody(e.code, e.message))
 }
 
 /**
@@ -173,17 +212,27 @@ function registerWebApp(app: FastifyInstance, webDir: string): void {
     return reply.sendFile(SPA_INDEX)
   })
   app.addHook('onSend', async (request, reply) => {
+    const type = reply.getHeader('content-type')
+    if (typeof type === 'string' && type.startsWith('text/html')) {
+      reply.header('content-security-policy', CONTENT_SECURITY_POLICY)
+    }
     if (!SHARED_PAGE_URL.test(request.url)) return
     reply.header('referrer-policy', 'no-referrer')
     reply.header('x-robots-tag', 'noindex')
   })
 }
 
-/** Runs the attachment sweep at boot (once the app is ready) and then every 24 hours; failures are logged, never fatal. */
-function scheduleAttachmentSweep(app: FastifyInstance): void {
+/**
+ * Runs the attachment sweep at boot (once the app is ready) and then every 24 hours until the app
+ * closes; failures are logged, never fatal. `sweep` is a test seam.
+ */
+export function scheduleAttachmentSweep(
+  app: FastifyInstance,
+  sweep: (db: Db, dataDir: string, nowSec: number) => Promise<SweepResult> = sweepAttachments,
+): void {
   const run = async () => {
     try {
-      const result = await sweepAttachments(app.db, app.config.dataDir, Math.floor(Date.now() / 1000))
+      const result = await sweep(app.db, app.config.dataDir, Math.floor(Date.now() / 1000))
       app.log.info(result, 'attachment sweep finished')
     } catch (err) {
       app.log.error({ err }, 'attachment sweep failed')

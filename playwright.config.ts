@@ -42,7 +42,7 @@ export default defineConfig({
       SESSION_SECRET: 'e2e-session-secret-0123456789abcdef0123456789',
       SHARE_HMAC_KEY: 'e2e-share-hmac-key-0123456789abcdef0123456789',
       PUBLIC_ORIGIN: origin,
-      ALLOW_SIGNUP: 'true',
+      // ALLOW_SIGNUP unset: the default first-user-only signup creates the owner on the empty DATA_DIR
       DATA_DIR: process.env.NOTES_E2E_DATA_DIR,
       HOST: '127.0.0.1',
       PORT: String(port),

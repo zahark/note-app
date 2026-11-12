@@ -60,7 +60,7 @@ describe('argon2Hasher', () => {
 describe('signup password policy and rate limit', () => {
   let t: TestApp
   beforeEach(async () => {
-    t = await makeApp()
+    t = await makeApp({ env: { ALLOW_SIGNUP: 'true' } })
   })
   afterEach(async () => {
     await closeApp(t)

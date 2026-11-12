@@ -26,6 +26,19 @@ export class ApiError extends Error {
 export const isUnauthorized = (err: unknown): boolean =>
   err instanceof ApiError && err.status === 401 && err.code === 'UNAUTHORIZED'
 
+/** The server could not be reached or failed (network error or 5xx), as opposed to refusing the request. */
+export const isUnreachable = (err: unknown): boolean =>
+  err instanceof ApiError && (err.status === 0 || err.status >= 500)
+
+/** The requested resource does not exist (404). */
+export const isNotFound = (err: unknown): boolean => err instanceof ApiError && err.status === 404
+
+/** User-facing text for a failed request (an `ApiError` carries the server's message). */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message
+  return 'Something went wrong, try again'
+}
+
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
 export interface RequestOptions {

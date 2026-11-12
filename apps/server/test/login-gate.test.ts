@@ -45,6 +45,8 @@ describe('LoginGate', () => {
       expect(gate.tryEnter('a').ok).toBe(true)
       const blocked = gate.tryEnter('a')
       windows.push(blocked.ok ? 0 : blocked.retryAfterMs)
+      // an attempt that got through must be finished; this one never reached a verdict
+      if (blocked.ok) gate.release('a')
       gate.recordFailure('a')
       clock.advance(10_000)
     }
@@ -60,7 +62,6 @@ describe('LoginGate', () => {
       clock.advance(10_000)
     }
     gate.recordSuccess('a')
-    expect(gate.failures('a')).toBe(0)
     expect(gate.tryEnter('a')).toEqual({ ok: true })
     expect(gate.tryEnter('a')).toEqual({ ok: true })
   })
@@ -90,11 +91,12 @@ describe('LoginGate', () => {
       gate.recordFailure('active')
       clock.advance(10_000)
     }
-    expect(gate.failures('idle')).toBe(8)
     // the 1000th tryEnter triggers a sweep
     for (let i = 0; i < 1000 - 16; i++) gate.tryEnter(`k-${i}`)
-    expect(gate.failures('idle')).toBe(0)
-    expect(gate.failures('active')).toBe(8)
+    // 'idle' was forgotten: two immediate attempts both get through (8 failures would open a window)
+    expect(gate.tryEnter('idle')).toEqual({ ok: true })
+    expect(gate.tryEnter('idle')).toEqual({ ok: true })
+    // 'active' kept its 8 failures
     expect(gate.tryEnter('active')).toEqual({ ok: true })
     expect(gate.tryEnter('active').ok).toBe(false)
   })
@@ -246,6 +248,36 @@ describe('device cookie', () => {
     await saturateGate()
     const res = await login(t.app, { email: 'owner@example.com', ip: '192.0.2.51', cookies: { did } })
     expect(res.statusCode).toBe(429)
+  })
+
+  it('a device cookie unused for over a year no longer bypasses the gate', async () => {
+    const did = cookieValue(await login(t.app, { email: 'owner@example.com' }), 'did')
+    t.clock.advance(10_000)
+    await saturateGate()
+    const yearAgo = Math.floor(t.clock.t / 1000) - 365 * 24 * 60 * 60
+    t.db.prepare('UPDATE known_devices SET last_used_at = ?').run(yearAgo)
+    const res = await login(t.app, { email: 'owner@example.com', ip: '192.0.2.51', cookies: { did } })
+    expect(res.statusCode).toBe(429)
+  })
+
+  it('logging in to a second account keeps the owner’s device cookie, which still bypasses the gate', async () => {
+    const ownerDid = cookieValue(await login(t.app, { email: 'owner@example.com' }), 'did')
+    // the same browser signs in to another account: no device cookie is set, none is registered
+    const second = await login(t.app, { email: 'second@example.com', cookies: { did: ownerDid } })
+    expect(second.statusCode).toBe(200)
+    expect(cookie(second, 'did')).toBeUndefined()
+    expect(t.db.prepare('SELECT COUNT(*) FROM known_devices').pluck().get()).toBe(1)
+    t.clock.advance(10_000)
+    await saturateGate()
+    const res = await login(t.app, { email: 'owner@example.com', ip: '192.0.2.51', cookies: { did: ownerDid } })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('an expired device cookie of another account is replaced', async () => {
+    const oldDid = cookieValue(await login(t.app, { email: 'second@example.com' }), 'did')
+    t.clock.advance((365 * 24 * 60 * 60 + 1) * 1000)
+    const res = await login(t.app, { email: 'owner@example.com', cookies: { did: oldDid } })
+    expect(cookieValue(res, 'did')).not.toBe(oldDid)
   })
 
   it('a device cookie still counts towards the per-(account, IP key) failure limit', async () => {

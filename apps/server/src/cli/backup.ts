@@ -5,27 +5,18 @@
 // Taking the database first and the files second is what keeps the pair consistent: every attachment row
 // in the copy had its file fully written before the row was inserted, and the only files that can vanish
 // afterwards are ones the sweep deletes, which by then have no references. Needs only DATA_DIR.
-import { createWriteStream, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { pathToFileURL } from 'node:url'
 import { createGzip } from 'node:zlib'
 import Database from 'better-sqlite3'
-import { DEFAULT_DATA_DIR } from '../config.js'
-import { DB_FILE_NAME } from '../db/index.js'
+import { BUSY_TIMEOUT_MS, DB_FILE_NAME } from '../db/index.js'
 import { uploadsDir } from '../services/attachments.js'
+import { CliError, cliDataDir, runIfInvokedDirectly } from './common.js'
 
 /** File name of the uploads tarball inside a backup directory; its entries are `uploads/<storage_name>`. */
 export const UPLOADS_ARCHIVE_NAME = 'uploads.tar.gz'
-
-/** An expected failure, reported to the operator without a stack trace. */
-export class BackupError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'BackupError'
-  }
-}
 
 export interface BackupOptions {
   /** DATA_DIR holding `notes.db` and `uploads/`. */
@@ -98,12 +89,12 @@ async function* tarStream(entries: { name: string; file: string }[], mtime: numb
  */
 export async function runBackup({ dataDir, outDir, now = new Date() }: BackupOptions): Promise<BackupResult> {
   const sourcePath = path.join(dataDir, DB_FILE_NAME)
-  if (!existsSync(sourcePath)) throw new BackupError(`No database at ${sourcePath} (check DATA_DIR)`)
+  if (!existsSync(sourcePath)) throw new CliError(`No database at ${sourcePath} (check DATA_DIR)`)
 
   const parent = path.resolve(outDir ?? path.join(dataDir, 'backups'))
   const name = `notes-backup-${stamp(now)}`
   const dir = path.join(parent, name)
-  if (existsSync(dir)) throw new BackupError(`${dir} already exists`)
+  if (existsSync(dir)) throw new CliError(`${dir} already exists`)
   const work = path.join(parent, `.${name}.partial`)
   rmSync(work, { recursive: true, force: true })
   mkdirSync(work, { recursive: true })
@@ -113,7 +104,7 @@ export async function runBackup({ dataDir, outDir, now = new Date() }: BackupOpt
     // opened without running migrations: a backup must copy the database exactly as it is
     const source = new Database(sourcePath, { fileMustExist: true })
     try {
-      source.pragma('busy_timeout = 5000')
+      source.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`)
       await source.backup(dbPath)
     } finally {
       source.close()
@@ -125,7 +116,7 @@ export async function runBackup({ dataDir, outDir, now = new Date() }: BackupOpt
       // a single self-contained file: no -wal/-shm next to the copy
       copy.pragma('journal_mode = DELETE')
       const check = copy.pragma('integrity_check', { simple: true })
-      if (check !== 'ok') throw new BackupError(`Backup copy failed its integrity check: ${String(check)}`)
+      if (check !== 'ok') throw new CliError(`Backup copy failed its integrity check: ${String(check)}`)
       storageNames = copy.prepare('SELECT storage_name FROM attachments ORDER BY storage_name').pluck().all() as string[]
     } finally {
       copy.close()
@@ -161,8 +152,8 @@ export async function runBackup({ dataDir, outDir, now = new Date() }: BackupOpt
 }
 
 async function main(args: string[]): Promise<void> {
-  if (args.length > 1) throw new BackupError('Usage: npm run backup -- [outDir]')
-  const dataDir = path.resolve(process.env.DATA_DIR?.trim() || DEFAULT_DATA_DIR)
+  if (args.length > 1) throw new CliError('Usage: npm run backup -- [outDir]')
+  const dataDir = cliDataDir()
   // npm runs scripts from apps/server; a relative outDir means relative to where the operator typed it
   const outDir = args[0] === undefined ? undefined : path.resolve(process.env.INIT_CWD ?? process.cwd(), args[0])
   const result = await runBackup({ dataDir, outDir })
@@ -170,19 +161,4 @@ async function main(args: string[]): Promise<void> {
   console.log(`Backup written to ${result.dir} (${DB_FILE_NAME} + ${UPLOADS_ARCHIVE_NAME}, ${result.files} files)`)
 }
 
-const invokedDirectly = (() => {
-  const script = process.argv[1]
-  if (!script) return false
-  try {
-    return import.meta.url === pathToFileURL(realpathSync(script)).href
-  } catch {
-    return false
-  }
-})()
-
-if (invokedDirectly) {
-  main(process.argv.slice(2)).catch((err: unknown) => {
-    console.error(err instanceof BackupError ? err.message : err)
-    process.exit(1)
-  })
-}
+runIfInvokedDirectly(import.meta.url, main)

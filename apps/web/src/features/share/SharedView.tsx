@@ -4,7 +4,8 @@ import { EditorContent, useEditor } from '@tiptap/react'
 import { useParams, useSearchParams } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { editorExtensions, toEditorContent } from '@/features/editor/extensions'
-import { ApiError } from '@/lib/api'
+import { displayTitle } from '@/features/tree/buildTree'
+import { isUnreachable } from '@/lib/api'
 import { createSharedAttachmentResolver, fetchSharedNote, type SharedCredential, type SharedNote } from './api'
 import { LockScreen } from './LockScreen'
 
@@ -56,8 +57,7 @@ function SharedNoteLoader({ noteId, credential }: { noteId: string; credential: 
     )
   }
   if (note.isError) {
-    const unreachable = note.error instanceof ApiError && (note.error.status === 0 || note.error.status >= 500)
-    if (unreachable) {
+    if (isUnreachable(note.error)) {
       return (
         <main className="flex min-h-svh flex-col items-center justify-center gap-3 p-4 text-center text-sm">
           <p className="text-muted-foreground">Could not load this note. Check your connection and try again.</p>
@@ -103,7 +103,7 @@ function SharedNoteContent({ noteId, credential, note }: SharedNoteContentProps)
   return (
     <main className="mx-auto max-w-3xl px-6 py-8">
       <p className="mb-2 text-xs tracking-wide text-muted-foreground uppercase">Shared note · read-only</p>
-      <h1 className="mb-4 text-2xl font-semibold break-words">{note.title || 'Untitled'}</h1>
+      <h1 className="mb-4 text-2xl font-semibold break-words">{displayTitle(note.title)}</h1>
       <EditorContent editor={editor} />
     </main>
   )

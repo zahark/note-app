@@ -1,4 +1,15 @@
-import { buildTree, countFolderContents, subtreeFolderIds, type TreeData, type TreeItem } from './buildTree'
+import type { TreeData } from './api'
+import { buildTree, countFolderContents, subtreeFolderIds, type TreeItem } from './buildTree'
+
+/** Server limits: folder names 1–255 chars, note titles 0–500. */
+export const MAX_NAME_LENGTH = { folder: 255, note: 500 } as const
+
+/** Indentation of one tree level, in px (sidebar rows and the Move-to list). */
+export const TREE_INDENT_PX = 12
+
+/** Folders `item` can never move into: a folder's own subtree (the server would refuse the cycle with 409). */
+const excludedTargets = (tree: TreeData, item: TreeItem): Set<string> =>
+  item.kind === 'folder' ? subtreeFolderIds(tree.folders, item.id) : new Set<string>()
 
 export interface MoveDestination {
   /** Target folder id; null = root. */
@@ -12,7 +23,7 @@ export interface MoveDestination {
  * itself or anything below it (the server would reject the cycle with 409), so those are left out.
  */
 export function moveDestinations(tree: TreeData, item: TreeItem): MoveDestination[] {
-  const excluded = item.kind === 'folder' ? subtreeFolderIds(tree.folders, item.id) : new Set<string>()
+  const excluded = excludedTargets(tree, item)
   const destinations: MoveDestination[] = [{ id: null, name: 'Root', depth: 0 }]
   const walk = (items: TreeItem[], depth: number) => {
     for (const child of items) {
@@ -50,7 +61,7 @@ export type DropStatus = 'valid' | 'current' | 'invalid'
  * folder's subtree is computed once here, not once per row.
  */
 export function dropRules(tree: TreeData, item: TreeItem): (target: string | null) => DropStatus {
-  const excluded = item.kind === 'folder' ? subtreeFolderIds(tree.folders, item.id) : new Set<string>()
+  const excluded = excludedTargets(tree, item)
   const folderIds = new Set(tree.folders.map((f) => f.id))
   return (target) => {
     if (target !== null && (excluded.has(target) || !folderIds.has(target))) return 'invalid'

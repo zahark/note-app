@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach, vi } from 'vitest'
+import { resetSavers } from '@/features/editor/api'
 
 // jsdom lacks ResizeObserver, which react-resizable-panels needs
 if (!('ResizeObserver' in globalThis)) {
@@ -38,6 +39,8 @@ if (typeof document.elementFromPoint !== 'function') {
 
 afterEach(() => {
   cleanup()
+  // a save a test held back must not make a later test's note load wait for it
+  resetSavers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   localStorage.clear()

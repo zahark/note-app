@@ -2,7 +2,7 @@
 // signed expiring links (HMAC over note_id|exp|nonce, 30-day cap, nonce rotation revokes), stopping,
 // and owner scoping of the share endpoints.
 import { createHmac } from 'node:crypto'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { openDb } from '../src/db/index.js'
 import { AppError } from '../src/errors.js'
 import { createNote } from '../src/repos/notes.js'
@@ -176,6 +176,23 @@ describe('password share', () => {
     expect(row()).toMatchObject({ share_type: 'private', share_secret: null, expires_at: null })
     expect(t.app.share.verifyToken(noteId, token)).toBe(false)
     expect(await unlockError(pin)).toBe('UNAVAILABLE')
+  })
+
+  it.each([
+    ['regenerated', () => sharePin()],
+    ['stopped', () => api(t.app, alice, 'DELETE', `/api/notes/${noteId}/share`)],
+  ])('a correct-PIN unlock still verifying fails when the share is %s meanwhile', async (_, change) => {
+    const pin = await sharePin()
+    t.hasher.blocked.add(pin)
+    const outcome = unlock(pin).then(
+      (r) => r,
+      (err: unknown) => (err instanceof AppError ? err.code : err),
+    )
+    await vi.waitFor(() => expect(t.hasher.active).toBe(1))
+    await change()
+    t.hasher.release()
+    // no token is minted (it would be bound to the new PIN's hash and unlock the re-shared note)
+    expect(await outcome).toBe('UNAVAILABLE')
   })
 
   it('a token from a PIN share does not survive switching the note to a signed link', async () => {

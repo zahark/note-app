@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { JSONContent } from '@tiptap/core'
-import { meQueryKey } from '@/features/auth/api'
-import { ApiError, isUnauthorized } from '@/lib/api'
-import { saveNoteContent } from './api'
+import { toast } from 'sonner'
+import { ApiError, errorMessage, isNotFound, isUnreachable } from '@/lib/api'
+import { handleUnauthorized } from '@/lib/queryClient'
+import { registerSaver, saveNoteContent, type RegisteredSaver } from './api'
 
 /**
  * - `saved`: everything typed so far is on the server
@@ -23,10 +24,6 @@ export interface AutosaverOptions {
   onStatus: (status: SaveStatus) => void
   /** Called with every failure other than a conflict (e.g. to handle a lost session). */
   onError?: (err: unknown) => void
-  /** Debounce after the last change, in ms. */
-  delay?: number
-  /** Wait before retrying a failed save, in ms. */
-  retryDelay?: number
 }
 
 /**
@@ -34,9 +31,11 @@ export interface AutosaverOptions {
  * session, a deleted note, a rejected body) would fail again; the next edit tries again instead.
  */
 const isTransient = (err: unknown): boolean =>
-  !(err instanceof ApiError) || err.status === 0 || err.status === 429 || err.status >= 500
+  !(err instanceof ApiError) || isUnreachable(err) || err.status === 429
 
+/** Debounce after the last change. */
 export const AUTOSAVE_DELAY_MS = 1000
+/** Wait before retrying a failed save. */
 export const AUTOSAVE_RETRY_MS = 5000
 
 /**
@@ -46,12 +45,10 @@ export const AUTOSAVE_RETRY_MS = 5000
  * content is sent with the current `version`; a save never starts while another is in flight, and
  * whatever is pending when it finishes (the latest content) is sent next. Each successful save
  * adopts the `version` the server returns. A 409 stops saving (`conflict`); any other failure keeps
- * the content pending (`error`) and, if it looks transient, retries after `retryDelay`.
+ * the content pending (`error`) and, if it looks transient, retries after `AUTOSAVE_RETRY_MS`.
  */
-export class Autosaver {
+export class Autosaver implements RegisteredSaver {
   private readonly options: AutosaverOptions
-  private readonly delay: number
-  private readonly retryDelay: number
   private version: number
   private pending: JSONContent | null = null
   private timer: ReturnType<typeof setTimeout> | undefined
@@ -61,20 +58,13 @@ export class Autosaver {
   private failed = false
   private conflicted = false
   private status: SaveStatus = 'saved'
+  /** Re-checked whenever a save ends or the saver is cancelled (see `until`). */
+  private readonly waiters = new Set<() => void>()
+  private editorOpen = true
 
   constructor(options: AutosaverOptions) {
     this.options = options
     this.version = options.version
-    this.delay = options.delay ?? AUTOSAVE_DELAY_MS
-    this.retryDelay = options.retryDelay ?? AUTOSAVE_RETRY_MS
-  }
-
-  get currentVersion(): number {
-    return this.version
-  }
-
-  get currentStatus(): SaveStatus {
-    return this.status
   }
 
   /** Whether some change is not on the server yet. */
@@ -82,11 +72,41 @@ export class Autosaver {
     return this.pending !== null || this.inFlight
   }
 
-  /** Records a change; it is saved once no other change arrives for `delay` ms. */
+  /**
+   * Nothing is left to save, or saving stopped: after a conflict, or after a failure that is not
+   * retried on a timer (it would fail again) until the next change.
+   */
+  private get settled(): boolean {
+    if (this.conflicted) return true
+    if (this.inFlight || this.flushQueued) return false
+    return this.pending === null || (this.failed && this.timer === undefined)
+  }
+
+  whenSettled = (): Promise<void> => this.until(() => this.settled)
+
+  /** Whether an editor shows this note; false once it closed (the saver may still have work left). */
+  get isOpen(): boolean {
+    return this.editorOpen
+  }
+
+  /** The editor showing the note opened (again). */
+  open = (): void => {
+    this.editorOpen = true
+  }
+
+  /** The editor closed: what is pending is sent now instead of waiting for the debounce. */
+  close = (): void => {
+    this.editorOpen = false
+    this.flush()
+  }
+
+  whenIdle = (): Promise<void> => this.until(() => !this.inFlight && !this.flushQueued)
+
+  /** Records a change; it is saved once no other change arrives for `AUTOSAVE_DELAY_MS`. */
   schedule = (content: JSONContent): void => {
     if (this.conflicted) return
     this.pending = content
-    this.restartTimer(this.delay)
+    this.restartTimer(AUTOSAVE_DELAY_MS)
     if (!this.inFlight && !this.failed) this.setStatus('pending')
   }
 
@@ -106,6 +126,7 @@ export class Autosaver {
     this.clearTimer()
     this.pending = null
     this.flushQueued = false
+    this.notify()
   }
 
   private async run(): Promise<void> {
@@ -126,7 +147,7 @@ export class Autosaver {
         // keep the content unless something newer is already waiting
         if (this.pending === null) this.pending = content
         // (a newer change already has its own debounce running)
-        if (isTransient(err) && this.timer === undefined && !this.flushQueued) this.restartTimer(this.retryDelay)
+        if (isTransient(err) && this.timer === undefined && !this.flushQueued) this.restartTimer(AUTOSAVE_RETRY_MS)
         this.options.onError?.(err)
       }
     } finally {
@@ -141,6 +162,23 @@ export class Autosaver {
     } else {
       this.setStatus(this.failed ? 'error' : this.pending !== null ? 'pending' : 'saved')
     }
+    this.notify()
+  }
+
+  private until(done: () => boolean): Promise<void> {
+    if (done()) return Promise.resolve()
+    return new Promise((resolve) => {
+      const check = () => {
+        if (!done()) return
+        this.waiters.delete(check)
+        resolve()
+      }
+      this.waiters.add(check)
+    })
+  }
+
+  private notify(): void {
+    for (const check of [...this.waiters]) check()
   }
 
   private restartTimer(ms: number): void {
@@ -167,10 +205,6 @@ export interface UseAutosaveOptions {
   noteId: string
   /** The version the note was loaded at. */
   version: number
-  /** Defaults to `PUT /api/notes/:id/content`. */
-  save?: (noteId: string, content: JSONContent, version: number) => Promise<{ version: number }>
-  delay?: number
-  retryDelay?: number
 }
 
 /**
@@ -178,42 +212,52 @@ export interface UseAutosaveOptions {
  * `version` are read once). Pending changes are flushed when the editor unmounts or the tab is
  * hidden, and closing the tab with unsaved changes asks for confirmation. A lost session sends the
  * user to the login page like any other request.
+ *
+ * The saver outlives the editor: after the editor closes it stays registered (unsaved-changes
+ * prompt, sign-out flush, reopening the note waits for it) and keeps retrying until nothing is left
+ * to save or saving stops for good; edits lost that way are reported in a toast.
+ *
+ * `error` is the server's message for a failure that retrying cannot fix (e.g. the note is too
+ * large); it is cleared by the next successful save.
  */
-export function useAutosave({ noteId, version, save = saveNoteContent, delay, retryDelay }: UseAutosaveOptions) {
+export function useAutosave({ noteId, version }: UseAutosaveOptions) {
   const client = useQueryClient()
   const [status, setStatus] = useState<SaveStatus>('saved')
-  const [saver] = useState(
-    () =>
-      new Autosaver({
-        version,
-        save: (content, v) => save(noteId, content, v),
-        onStatus: setStatus,
-        onError: (err) => {
-          if (isUnauthorized(err)) client.setQueryData(meQueryKey, null)
-        },
-        delay,
-        retryDelay,
-      }),
-  )
+  const [error, setError] = useState<string | null>(null)
+  const [saver] = useState(() => {
+    const created: Autosaver = new Autosaver({
+      version,
+      save: (content, v) => saveNoteContent(noteId, content, v),
+      onStatus: (next) => {
+        if (next === 'saved') setError(null)
+        if (next === 'conflict' && !created.isOpen) {
+          toast.error('Your last edits to a closed note were not saved: it was changed somewhere else')
+        }
+        setStatus(next)
+      },
+      onError: (err) => {
+        handleUnauthorized(client, err)
+        setError(isTransient(err) ? null : errorMessage(err))
+        // (no toast when the note itself was deleted)
+        if (!created.isOpen && !isTransient(err) && !isNotFound(err)) {
+          toast.error(`Your last edits to a closed note were not saved: ${errorMessage(err)}`)
+        }
+      },
+    })
+    return created
+  })
 
   useEffect(() => {
-    const onHide = () => {
-      if (document.visibilityState === 'hidden') saver.flush()
-    }
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!saver.hasUnsavedChanges) return
-      saver.flush()
-      event.preventDefault()
-    }
-    document.addEventListener('visibilitychange', onHide)
-    window.addEventListener('beforeunload', onBeforeUnload)
+    saver.open()
+    const unregister = registerSaver(noteId, saver)
     return () => {
-      document.removeEventListener('visibilitychange', onHide)
-      window.removeEventListener('beforeunload', onBeforeUnload)
-      // leaving the note: save what is pending instead of waiting for the debounce
-      saver.flush()
+      saver.close()
+      // unregistered only once its work is done (unless the editor came back meanwhile, as in StrictMode)
+      void saver.whenSettled().then(() => {
+        if (!saver.isOpen) unregister()
+      })
     }
-  }, [saver])
+  }, [noteId, saver])
 
-  return { status, schedule: saver.schedule, flush: saver.flush, saver }
+  return { status, schedule: saver.schedule, error }
 }

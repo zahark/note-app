@@ -1,14 +1,18 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { api } from '@/lib/api'
-import { errorMessage, treeQueryKey } from './api'
-import { subtreeFolderIds, type TreeData, type TreeFolder, type TreeNote } from './buildTree'
+import { api, errorMessage } from '@/lib/api'
+import { treeQueryKey, type TreeData, type TreeFolder, type TreeNote } from './api'
+import { subtreeFolderIds } from './buildTree'
 
 interface OptimisticTreeMutation<TVars, TResult> {
   mutationFn: (vars: TVars) => Promise<TResult>
   /** The change applied to the cached tree before the request is sent. */
   apply: (tree: TreeData, vars: TVars) => TreeData
-  /** Folds the server's response into the cached tree once the request succeeds. */
+  /**
+   * Folds the server's response into the cached tree once the request succeeds. Only the field the
+   * mutation changed is taken from it: the rest of the row may be older than what a later mutation
+   * of the same item has already applied.
+   */
   reconcile?: (tree: TreeData, result: TResult) => TreeData
   /** Toast prefix on failure, e.g. "Could not rename folder". */
   failure: string
@@ -46,22 +50,13 @@ function useOptimisticTreeMutation<TVars, TResult>({
   })
 }
 
-const replaceFolder = (tree: TreeData, folder: TreeFolder): TreeData => ({
-  ...tree,
-  folders: tree.folders.map((f) => (f.id === folder.id ? folder : f)),
-})
-
-const replaceNote = (tree: TreeData, note: TreeNote): TreeData => ({
-  ...tree,
-  notes: tree.notes.map((n) => (n.id === note.id ? note : n)),
-})
-
 const patchFolder = (tree: TreeData, id: string, patch: Partial<TreeFolder>): TreeData => ({
   ...tree,
   folders: tree.folders.map((f) => (f.id === id ? { ...f, ...patch } : f)),
 })
 
-const patchNote = (tree: TreeData, id: string, patch: Partial<TreeNote>): TreeData => ({
+/** The tree with note `id`'s fields replaced by `patch`. */
+export const patchNote = (tree: TreeData, id: string, patch: Partial<TreeNote>): TreeData => ({
   ...tree,
   notes: tree.notes.map((n) => (n.id === id ? { ...n, ...patch } : n)),
 })
@@ -83,7 +78,7 @@ export function useRenameFolder() {
     mutationFn: ({ id, name }: { id: string; name: string }) =>
       api.patch<FolderResponse>(`/api/folders/${encodeURIComponent(id)}`, { name }),
     apply: (tree, { id, name }) => patchFolder(tree, id, { name }),
-    reconcile: (tree, { folder }) => replaceFolder(tree, folder),
+    reconcile: (tree, { folder }) => patchFolder(tree, folder.id, { name: folder.name }),
     failure: 'Could not rename folder',
   })
 }
@@ -94,7 +89,7 @@ export function useRenameNote() {
     mutationFn: ({ id, title }: { id: string; title: string }) =>
       api.patch<NoteResponse>(`/api/notes/${encodeURIComponent(id)}`, { title }),
     apply: (tree, { id, title }) => patchNote(tree, id, { title }),
-    reconcile: (tree, { note }) => replaceNote(tree, note),
+    reconcile: (tree, { note }) => patchNote(tree, note.id, { title: note.title }),
     failure: 'Could not rename note',
   })
 }
@@ -105,7 +100,7 @@ export function useMoveFolder() {
     mutationFn: ({ id, parentFolderId }: { id: string; parentFolderId: string | null }) =>
       api.patch<FolderResponse>(`/api/folders/${encodeURIComponent(id)}/move`, { parent_folder_id: parentFolderId }),
     apply: (tree, { id, parentFolderId }) => patchFolder(tree, id, { parent_folder_id: parentFolderId }),
-    reconcile: (tree, { folder }) => replaceFolder(tree, folder),
+    reconcile: (tree, { folder }) => patchFolder(tree, folder.id, { parent_folder_id: folder.parent_folder_id }),
     failure: 'Could not move folder',
   })
 }
@@ -116,7 +111,7 @@ export function useMoveNote() {
     mutationFn: ({ id, folderId }: { id: string; folderId: string | null }) =>
       api.patch<NoteResponse>(`/api/notes/${encodeURIComponent(id)}/move`, { folder_id: folderId }),
     apply: (tree, { id, folderId }) => patchNote(tree, id, { folder_id: folderId }),
-    reconcile: (tree, { note }) => replaceNote(tree, note),
+    reconcile: (tree, { note }) => patchNote(tree, note.id, { folder_id: note.folder_id }),
     failure: 'Could not move note',
   })
 }

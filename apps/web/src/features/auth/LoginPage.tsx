@@ -2,9 +2,10 @@ import { useState, type FormEvent } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { useLogin, useMe, useSignup } from './api'
+import { errorMessage } from '@/lib/api'
+import { useLogin, useMe, useSignup, useSignupStatus } from './api'
 import { FormField } from './FormField'
-import { errorMessage, validateEmail, validatePassword } from './validation'
+import { validateEmail, validatePassword } from './validation'
 
 type Mode = 'login' | 'signup'
 
@@ -27,8 +28,12 @@ export function LoginPage() {
   const target = useRedirectTarget()
   const login = useLogin()
   const signup = useSignup()
+  // unknown (loading or failed) counts as open: the server refuses a closed signup anyway
+  const signupClosed = useSignupStatus().data?.open === false
 
-  const [mode, setMode] = useState<Mode>('login')
+  const [selectedMode, setMode] = useState<Mode>('login')
+  // closed while the signup form was open (e.g. the owner's account now exists): back to sign in
+  const mode: Mode = signupClosed ? 'login' : selectedMode
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -118,17 +123,23 @@ export function LoginPage() {
               {mutation.isPending ? 'Please wait…' : isLogin ? 'Sign in' : 'Create account'}
             </Button>
           </form>
-          <p className="mt-4 text-center text-sm text-muted-foreground">
-            {isLogin ? 'No account yet? ' : 'Already have an account? '}
-            <Button
-              type="button"
-              variant="link"
-              className="h-auto p-0"
-              onClick={() => switchMode(isLogin ? 'signup' : 'login')}
-            >
-              {isLogin ? 'Create one' : 'Sign in'}
-            </Button>
-          </p>
+          {signupClosed ? (
+            <p className="mt-4 text-center text-sm text-muted-foreground">
+              New accounts cannot be created on this server.
+            </p>
+          ) : (
+            <p className="mt-4 text-center text-sm text-muted-foreground">
+              {isLogin ? 'No account yet? ' : 'Already have an account? '}
+              <Button
+                type="button"
+                variant="link"
+                className="h-auto p-0"
+                onClick={() => switchMode(isLogin ? 'signup' : 'login')}
+              >
+                {isLogin ? 'Create one' : 'Sign in'}
+              </Button>
+            </p>
+          )}
         </CardContent>
       </Card>
     </main>

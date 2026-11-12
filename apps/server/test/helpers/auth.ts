@@ -87,15 +87,19 @@ export async function makeApp(
   opts: {
     env?: Record<string, string>
     hashWaitMs?: number
+    /** General hash slots (default 4). */
+    hashSlots?: number
+    /** Reuse this database instead of a fresh in-memory one. */
+    db?: Db
     /** Called for every route registered (an `onRoute` hook installed before the app is ready). */
     onRoute?: (route: RouteOptions) => void
   } = {},
 ): Promise<TestApp> {
-  const db = openDb(':memory:')
+  const db = opts.db ?? openDb(':memory:')
   const hasher = new FakeHasher()
   const clock = new FakeClock()
   const config = testConfig(opts.env)
-  const hashLimiter = new HashLimiter({ maxWaitMs: opts.hashWaitMs ?? 2000 })
+  const hashLimiter = new HashLimiter({ maxWaitMs: opts.hashWaitMs ?? 2000, general: opts.hashSlots ?? 4 })
   const app = buildApp({ config, db, auth: { hasher, hashLimiter, now: clock.now } })
   if (opts.onRoute) app.addHook('onRoute', opts.onRoute)
   await app.ready()

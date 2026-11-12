@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
 import {
   closestCenter,
   DndContext,
@@ -7,7 +7,6 @@ import {
   MeasuringStrategy,
   MouseSensor,
   pointerWithin,
-  useDraggable,
   useDroppable,
   useSensor,
   useSensors,
@@ -21,29 +20,13 @@ import {
 } from '@dnd-kit/core'
 import { FileTextIcon, FolderIcon, FolderUpIcon } from 'lucide-react'
 import { cn } from 'cn'
-import type { TreeData, TreeItem } from './buildTree'
-import { dropRules, type DropStatus } from './treeOps'
+import type { TreeData } from './api'
+import type { TreeItem } from './buildTree'
+import { dropRules } from './treeOps'
+import { TreeDndContext, type DragData, type DropData } from './useTreeRowDnd'
 
 /** Droppable id of the "move to root" zone (folder ids are UUIDs, so it can't collide). */
 const ROOT_DROP_ID = '__root__'
-
-interface DragData {
-  item: TreeItem
-}
-
-interface DropData {
-  /** Target folder id; null = root. */
-  target: string | null
-  label: string
-}
-
-interface TreeDndState {
-  /** The item being dragged, if any. */
-  active: TreeItem | null
-  statusOf: (target: string | null) => DropStatus
-}
-
-const TreeDndContext = createContext<TreeDndState>({ active: null, statusOf: () => 'invalid' })
 
 /**
  * Pointer: the folder row under the cursor. Keyboard (no pointer): the droppable whose center is
@@ -160,34 +143,6 @@ export function TreeDnd({ tree, onMove, children }: TreeDndProps) {
       </DndContext>
     </TreeDndContext.Provider>
   )
-}
-
-/** How a row looks as a drop target during a drag. */
-export type DropHighlight = 'over' | 'valid' | 'invalid' | undefined
-
-/**
- * Drag source for a tree row, and drop target if it is a folder. A folder is only an enabled drop
- * target while a drag is on and the dragged item may go into it, so the collision detection and
- * the keyboard never land on the dragged folder, its descendants or the item's own folder.
- */
-// eslint-disable-next-line react-refresh/only-export-components -- the row hook belongs with its provider
-export function useTreeRowDnd(item: TreeItem, disabled: boolean) {
-  const { active, statusOf } = useContext(TreeDndContext)
-  const {
-    setNodeRef: setDragRef,
-    attributes: dragAttributes,
-    listeners: dragListeners,
-    isDragging,
-  } = useDraggable({ id: item.id, data: { item } satisfies DragData, disabled })
-  const status = item.kind === 'folder' && active ? statusOf(item.id) : undefined
-  const { setNodeRef: setDropRef, isOver } = useDroppable({
-    id: item.id,
-    data: { target: item.id, label: item.name } satisfies DropData,
-    disabled: status !== 'valid',
-  })
-  const highlight: DropHighlight =
-    status === 'valid' ? (isOver ? 'over' : 'valid') : status === 'invalid' ? 'invalid' : undefined
-  return { setDragRef, dragAttributes, dragListeners, isDragging, setDropRef, highlight }
 }
 
 /** "Move to root" target, shown at the bottom of the tree while a drag is on. */

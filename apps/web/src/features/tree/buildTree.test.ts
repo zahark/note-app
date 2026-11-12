@@ -1,4 +1,5 @@
-import { buildTree, collectFolderIds, displayTitle, type TreeFolder, type TreeNote } from './buildTree'
+import type { TreeFolder, TreeNote } from './api'
+import { buildTree, displayTitle } from './buildTree'
 
 const folder = (id: string, name: string, parent: string | null = null, created_at = 1): TreeFolder => ({
   id,
@@ -81,17 +82,6 @@ describe('buildTree', () => {
     )
     expect(shape(tree)).toEqual([['Lost folder', ['Kept']], 'Lost note'])
     expect(tree[0]?.parentId).toBeNull()
-  })
-
-  it('is orphan-safe for a parent cycle: every folder still appears exactly once', () => {
-    const tree = buildTree(
-      [folder('a', 'A', 'b'), folder('b', 'B', 'a'), folder('c', 'C', 'c')],
-      [note('n1', 'In A', 'a')],
-    )
-    const ids = collectFolderIds(tree)
-    expect(ids.sort()).toEqual(['a', 'b', 'c'])
-    // the cycle is broken at the first folder by name; its child follows beneath it
-    expect(shape(tree)).toEqual([['A', [['B', []], 'In A']], ['C', []]])
   })
 })
 

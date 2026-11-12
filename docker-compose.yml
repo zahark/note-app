@@ -13,7 +13,12 @@ services:
     build: .
     image: notes-app:latest
     restart: unless-stopped
-    env_file: .env
+    # optional settings (LOG_LEVEL, ALLOW_SIGNUP, ...) reach the container only through this file; it
+    # is optional so that `docker compose config` and `--env-file` work without it, while the
+    # required values below still stop Compose with a clear message when they are missing
+    env_file:
+      - path: .env
+        required: false
     environment:
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env (openssl rand -hex 32)}
       SHARE_HMAC_KEY: ${SHARE_HMAC_KEY:?set SHARE_HMAC_KEY in .env (openssl rand -hex 32)}
@@ -35,6 +40,8 @@ networks:
     ipam:
       config:
         - subnet: 172.30.0.0/24
+          # pinned: without it Docker takes the gateway from ip_range (172.30.0.128)
+          gateway: 172.30.0.1
           # dynamic addresses come from the upper half only, so the fixed 172.30.0.10 used by the
           # tunnel override can never be handed to another container
           ip_range: 172.30.0.128/25

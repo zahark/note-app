@@ -2,7 +2,8 @@ import { createElement } from 'react'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockFetch, renderWithProviders, type MockResponse, type RecordedRequest } from '@/test/utils'
-import { buildTree, type TreeData, type TreeFolder, type TreeItem, type TreeNote } from './buildTree'
+import type { TreeData, TreeFolder, TreeNote } from './api'
+import { buildTree, type TreeItem } from './buildTree'
 import { dropRules } from './treeOps'
 import { Sidebar } from './Sidebar'
 import { EXPANDED_STORAGE_KEY } from './useExpanded'
@@ -80,7 +81,7 @@ describe('dropRules', () => {
 
   it('terminates on a folder cycle in a stale cache', () => {
     const cyclic: TreeData = { folders: [folder('a', 'A', 'b'), folder('b', 'B', 'a'), folder('c', 'C')], notes: [] }
-    const item = findItem(buildTree(cyclic.folders, []), 'a')!
+    const item: TreeItem = { kind: 'folder', id: 'a', name: 'A', parentId: null, depth: 0, folder: cyclic.folders[0]!, children: [] }
     const statusOf = dropRules(cyclic, item)
     expect([statusOf('a'), statusOf('b'), statusOf('c')]).toEqual(['invalid', 'invalid', 'valid'])
   })

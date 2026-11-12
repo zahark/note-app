@@ -1,8 +1,9 @@
 import { useState, type FormEvent } from 'react'
 import { Button } from '@/components/ui/button'
+import { errorMessage } from '@/lib/api'
 import { useChangePassword } from './api'
 import { FormField } from './FormField'
-import { errorMessage, validatePassword } from './validation'
+import { validatePassword } from './validation'
 
 interface FieldErrors {
   currentPassword?: string | null

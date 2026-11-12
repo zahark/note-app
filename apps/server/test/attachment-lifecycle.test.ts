@@ -7,8 +7,9 @@
 // not move it.
 import { existsSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { buildApp } from '../src/app.js'
+import Fastify from 'fastify'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildApp, scheduleAttachmentSweep, SWEEP_INTERVAL_MS } from '../src/app.js'
 import { openDb } from '../src/db/index.js'
 import { SWEEP_GRACE_SEC, sweepAttachments, uploadsDir } from '../src/services/attachments.js'
 import { closeApp, makeApp, testConfig, type TestApp } from './helpers/auth.js'
@@ -287,15 +288,21 @@ describe('sweep', () => {
     expect(await loads(alice, aid)).toBe(true)
   })
 
-  it('an upload racing a content save without it is not deleted', async () => {
+  it('an upload racing a content save without it keeps its full grace period, then the next save links it', async () => {
     const note = await newNote(alice)
     // the upload lands while the editor saves content that does not contain it yet
     const [aid] = await Promise.all([uploadPng(t.app, alice), save(alice, note, doc('typing'))])
     expect(links(note)).toEqual([])
-    expect(await sweep()).toEqual({ attachments: 0, strays: 0 })
+    // the racing save is not an unlink: the grace period still runs from the upload itself
+    expect(attachment(aid!)?.last_unlinked_at).toBeNull()
+    expect(await sweep(SWEEP_GRACE_SEC - 60)).toEqual({ attachments: 0, strays: 0 })
     expect(fileExists(aid!)).toBe(true)
     await save(alice, note, docWithImages(aid!))
     expect(links(note)).toEqual([aid])
+    // once linked it is kept by the link, far past the grace period
+    backdate(aid!, { created: 60 * DAY })
+    expect(await sweep(60 * DAY)).toEqual({ attachments: 0, strays: 0 })
+    expect(fileExists(aid!)).toBe(true)
   })
 
   it('does nothing when the uploads directory does not exist yet', async () => {
@@ -341,25 +348,58 @@ describe('sweep scheduling', () => {
     return file
   }
 
-  async function bootApp(attachmentSweep: boolean) {
+  async function bootApp(attachmentSweep: boolean, whileRunning: () => Promise<void>) {
     const db = openDb(':memory:')
     const app = buildApp({ config: testConfig({ DATA_DIR: dataDir }), db, attachmentSweep })
     await app.ready()
-    // the boot sweep runs in the background once the app is ready
-    await new Promise((r) => setTimeout(r, 50))
-    await app.close()
-    db.close()
+    try {
+      await whileRunning()
+    } finally {
+      await app.close()
+      db.close()
+    }
   }
 
   it('with attachmentSweep on, the app sweeps once when it is ready', async () => {
     const file = oldStray()
-    await bootApp(true)
-    expect(existsSync(file)).toBe(false)
+    // the boot sweep runs in the background once the app is ready
+    await bootApp(true, () => vi.waitFor(() => expect(existsSync(file)).toBe(false)))
   })
 
   it('is off by default, so an app never touches an uploads directory it was not asked to sweep', async () => {
     const file = oldStray()
-    await bootApp(false)
+    // a sweep would have finished well within this wait (the "on" case above takes a few ms)
+    await bootApp(false, () => new Promise((r) => setTimeout(r, 50)))
     expect(existsSync(file)).toBe(true)
+  })
+
+  it('sweeps at boot, again every 24 hours, and never after the app is closed', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const db = openDb(':memory:')
+      const app = Fastify()
+      app.decorate('db', db)
+      app.decorate('config', testConfig({ DATA_DIR: dataDir }))
+      const sweepFn = vi.fn(async () => ({ attachments: 0, strays: 0 }))
+      scheduleAttachmentSweep(app, sweepFn)
+      expect(sweepFn).not.toHaveBeenCalled()
+      await app.ready()
+      expect(sweepFn).toHaveBeenCalledTimes(1)
+      expect(sweepFn).toHaveBeenLastCalledWith(db, dataDir, expect.any(Number))
+
+      vi.advanceTimersByTime(SWEEP_INTERVAL_MS - 1)
+      expect(sweepFn).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(1)
+      expect(sweepFn).toHaveBeenCalledTimes(2)
+      vi.advanceTimersByTime(SWEEP_INTERVAL_MS)
+      expect(sweepFn).toHaveBeenCalledTimes(3)
+
+      await app.close()
+      vi.advanceTimersByTime(3 * SWEEP_INTERVAL_MS)
+      expect(sweepFn).toHaveBeenCalledTimes(3)
+      db.close()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

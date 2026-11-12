@@ -2,10 +2,10 @@
 // note id (id-agnostic: missing and private ids count the same), 30 attempts / 15 min per IP key, both
 // checked before any database lookup or argon2 verify.
 import { randomUUID } from 'node:crypto'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppError } from '../src/errors.js'
 import { UNLOCK_LIMITS } from '../src/services/share.js'
-import { closeApp, makeApp, type TestApp } from './helpers/auth.js'
+import { closeApp, makeApp, signup, type TestApp } from './helpers/auth.js'
 import { api, loginAs, type TestUser } from './helpers/api.js'
 
 const WRONG = 'ZZZZZZZZ'
@@ -135,6 +135,36 @@ describe('per-note-id unlock limit', () => {
     expect(outcomes.filter((o) => status(o) === 429)).toHaveLength(7)
     expect(outcomes.filter((o) => status(o) === 404)).toHaveLength(5)
     expect(t.hasher.verifyCalls).toBe(verifies + 5)
+    expect(status(await attempt(id, pin))).toBe(429)
+  })
+})
+
+describe('hash limiter busy during unlock', () => {
+  it('503 BUSY attempts are not failures and release their in-flight reservation', async () => {
+    await closeApp(t)
+    t = await makeApp({ hashWaitMs: 20, env: { ALLOW_SIGNUP: 'true' } })
+    alice = await loginAs(t, 'alice@example.com')
+    const { id, pin } = await pinShared()
+    // occupy all 4 general hash slots with signups whose hashing blocks
+    const held = Array.from({ length: 4 }, (_, i) => {
+      const password = `held signup password ${i}`
+      t.hasher.blocked.add(password)
+      return signup(t.app, { email: `held${i}@example.com`, password, ip: '192.0.2.200' })
+    })
+    await vi.waitFor(() => expect(t.hasher.active).toBe(4))
+
+    // two rounds of 5 parallel guesses (the in-flight cap): if the first round's 503s were counted or
+    // stayed reserved, the second round would get 429
+    for (let round = 0; round < 2; round++) {
+      const busy = await Promise.all(Array.from({ length: 5 }, (_, i) => attempt(id, WRONG, `198.51.100.${i + 1}`)))
+      for (const o of busy) expect(o).toMatchObject({ ok: false, status: 503, code: 'BUSY' })
+    }
+
+    t.hasher.release()
+    await Promise.all(held)
+    // nothing was counted or left reserved: the correct PIN unlocks, then 5 wrong guesses are allowed
+    expect((await attempt(id, pin)).ok).toBe(true)
+    for (let i = 0; i < 5; i++) expect(status(await attempt(id, WRONG))).toBe(404)
     expect(status(await attempt(id, pin))).toBe(429)
   })
 })

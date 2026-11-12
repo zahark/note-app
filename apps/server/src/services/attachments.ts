@@ -6,27 +6,48 @@
 // `note_attachments_unlinked` trigger stamps `last_unlinked_at`). Images are deleted only by the sweep.
 import { randomBytes } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
-import { readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { Db } from '../db/index.js'
-import { AppError } from '../errors.js'
-import { createAttachment, setNoteAttachments, type AttachmentRow } from '../repos/attachments.js'
+import { AppError, unsupportedMediaType } from '../errors.js'
+import {
+  attachmentBytesUsed,
+  createAttachment,
+  setNoteAttachments,
+  type AttachmentRow,
+} from '../repos/attachments.js'
 import { saveNoteContent, type SaveContentResult } from '../repos/notes.js'
 import { deleteSweepableAttachments, listAllStorageNames } from '../repos/publicShare.js'
+import { DAY_SEC, HOUR_SEC, MIB, MINUTE_MS } from '../units.js'
 
 /** Largest accepted upload. */
-export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+export const MAX_ATTACHMENT_BYTES = 10 * MIB
+
+/**
+ * Upload rate limit per account: generous enough for pasting a large batch of screenshots, while
+ * bounding how fast one account can fill the disk (together with the per-account storage quota).
+ */
+export const UPLOAD_LIMIT = { limit: 100, windowMs: 15 * MINUTE_MS } as const
 
 /** An unreferenced attachment is swept this long after it lost its last reference (or was uploaded). */
-export const SWEEP_GRACE_SEC = 7 * 24 * 60 * 60
+export const SWEEP_GRACE_SEC = 7 * DAY_SEC
 
 /** A file in the uploads directory with no row is deleted only once it is this old. */
-export const STRAY_GRACE_SEC = 60 * 60
+export const STRAY_GRACE_SEC = HOUR_SEC
 
 export type ImageMime = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
 
 /** Directory holding the uploaded files. */
 export const uploadsDir = (dataDir: string): string => path.join(dataDir, 'uploads')
+
+/** The bytes of the uploaded file `storageName`, or undefined when it cannot be read (e.g. missing). */
+export async function readAttachmentFile(dataDir: string, storageName: string): Promise<Buffer | undefined> {
+  try {
+    return await readFile(path.join(uploadsDir(dataDir), storageName))
+  } catch {
+    return undefined
+  }
+}
 
 const startsWith = (buf: Buffer, bytes: number[], offset = 0): boolean =>
   buf.length >= offset + bytes.length && bytes.every((b, i) => buf[offset + i] === b)
@@ -45,33 +66,52 @@ export function detectImageMime(buf: Buffer): ImageMime | null {
   return null
 }
 
-const unsupported = () =>
-  new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Only PNG, JPEG, WebP and GIF images are allowed')
+const unsupported = () => unsupportedMediaType('Only PNG, JPEG, WebP and GIF images are allowed')
 
 export interface UploadInput {
   /** Client-supplied file name; display only, never used in a path. */
   originalName: string
-  /** Client-declared content type; must match the type detected from the bytes. */
-  declaredMime: string
   data: Buffer
 }
 
+/** 413 `QUOTA_EXCEEDED`: storing this image would take the account past `UPLOAD_QUOTA_MB`. */
+export const quotaExceeded = (quotaMb: number) =>
+  new AppError(
+    413,
+    'QUOTA_EXCEEDED',
+    `Image storage is full (${quotaMb} MB per account). Remove images you no longer need from your ` +
+      `notes; their space is freed ${SWEEP_GRACE_SEC / DAY_SEC} days after removal`,
+  )
+
 /**
- * Validates and stores an upload: checks size and magic bytes (the declared type must agree), writes
- * the bytes under a random `storage_name`, then inserts the row (with `last_unlinked_at` NULL). If the
- * insert fails the file is removed again; a file left behind by a crash is a stray the sweep removes.
+ * Throws `quotaExceeded` when the user's stored images plus `incomingBytes` would exceed the quota
+ * (`quotaMb` 0 = no limit). Counts every stored image, including unreferenced ones awaiting the sweep.
+ */
+export function assertWithinQuota(db: Db, userId: string, quotaMb: number, incomingBytes: number): void {
+  if (quotaMb <= 0) return
+  if (attachmentBytesUsed(db, userId) + incomingBytes > quotaMb * MIB) throw quotaExceeded(quotaMb)
+}
+
+/**
+ * Validates and stores an upload: checks size and magic bytes (the browser-declared type is ignored: it
+ * comes from the file extension, which is often wrong; the detected type is what gets stored), writes
+ * the bytes under a random `storage_name`, then checks the quota and inserts the row (with
+ * `last_unlinked_at` NULL) in one synchronous step, so parallel uploads cannot together overshoot it.
+ * If the quota check or the insert fails the file is removed again; a file left behind by a crash is a
+ * stray the sweep removes. `quotaMb` is the per-account limit in MiB (0 = no limit).
  */
 export async function storeUpload(
   db: Db,
   dataDir: string,
   userId: string,
   input: UploadInput,
+  quotaMb = 0,
 ): Promise<AttachmentRow> {
   if (input.data.length > MAX_ATTACHMENT_BYTES) {
-    throw new AppError(413, 'PAYLOAD_TOO_LARGE', 'Images are limited to 10 MB')
+    throw new AppError(413, 'PAYLOAD_TOO_LARGE', `Images are limited to ${MAX_ATTACHMENT_BYTES / MIB} MB`)
   }
   const mime = detectImageMime(input.data)
-  if (!mime || input.declaredMime.toLowerCase() !== mime) throw unsupported()
+  if (!mime) throw unsupported()
 
   const dir = uploadsDir(dataDir)
   mkdirSync(dir, { recursive: true })
@@ -79,6 +119,7 @@ export async function storeUpload(
   const file = path.join(dir, storageName)
   await writeFile(file, input.data, { flag: 'wx' })
   try {
+    assertWithinQuota(db, userId, quotaMb, input.data.length)
     return createAttachment(db, userId, {
       originalName: displayName(input.originalName),
       storageName,

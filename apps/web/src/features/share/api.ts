@@ -1,8 +1,8 @@
 import type { QueryClient } from '@tanstack/react-query'
 import type { JSONContent } from '@tiptap/core'
 import type { AttachmentResolver } from '@/features/editor/AttachmentImage'
-import type { TreeData, TreeNote } from '@/features/tree/buildTree'
-import { treeQueryKey } from '@/features/tree/api'
+import { treeQueryKey, type TreeData, type TreeNote } from '@/features/tree/api'
+import { patchNote } from '@/features/tree/mutations'
 import { api, apiFetch, ApiError } from '@/lib/api'
 
 // ---- owner side: enable, regenerate and stop sharing ----
@@ -54,13 +54,9 @@ export const sharedPageUrl = (noteId: string) => `${window.location.origin}/shar
 
 /** Records a note's new share state in the cached tree (sharing changes neither `version` nor the title). */
 export function setTreeShareState(client: QueryClient, noteId: string, shareType: ShareType, expiresAt: number | null) {
-  client.setQueryData<TreeData>(treeQueryKey, (tree) =>
-    tree
-      ? {
-          ...tree,
-          notes: tree.notes.map((n) => (n.id === noteId ? { ...n, share_type: shareType, expires_at: expiresAt } : n)),
-        }
-      : tree,
+  client.setQueryData<TreeData>(
+    treeQueryKey,
+    (tree) => tree && patchNote(tree, noteId, { share_type: shareType, expires_at: expiresAt }),
   )
 }
 
@@ -105,6 +101,9 @@ function withCredential(path: string, credential: SharedCredential): { url: stri
 }
 
 /** `POST /api/shared/:id/unlock {pin}` → a 30-minute read token for that note. */
+/** Wrong PIN, missing, private or link-only note: one message, so nothing is revealed. */
+export const GENERIC_UNLOCK_ERROR = 'That PIN did not work, or this note is no longer shared.'
+
 export function unlockSharedNote(noteId: string, pin: string): Promise<{ token: string; expires_at: number }> {
   return apiFetch(`${sharedApiPath(noteId)}/unlock`, { method: 'POST', body: { pin }, credentials: 'omit' })
 }
@@ -115,8 +114,8 @@ export async function fetchSharedNote(noteId: string, credential: SharedCredenti
   return (await apiFetch<{ note: SharedNote }>(url, { headers, signal, credentials: 'omit' })).note
 }
 
-/** The shared-attachment URL and headers for image `aid` of note `noteId` (exported for tests). */
-export const sharedAttachmentRequest = (noteId: string, aid: string, credential: SharedCredential) =>
+/** The shared-attachment URL and headers for image `aid` of note `noteId`. */
+const sharedAttachmentRequest = (noteId: string, aid: string, credential: SharedCredential) =>
   withCredential(`${sharedApiPath(noteId)}/attachments/${encodeURIComponent(aid)}`, credential)
 
 export interface SharedAttachmentResolver {

@@ -1,30 +1,4 @@
-/** A folder as returned by `GET /api/tree`. */
-export interface TreeFolder {
-  id: string
-  name: string
-  /** null = root. */
-  parent_folder_id: string | null
-  created_at: number
-}
-
-/** A note summary (no content) as returned by `GET /api/tree`. */
-export interface TreeNote {
-  id: string
-  /** null = root. */
-  folder_id: string | null
-  title: string
-  version: number
-  created_at: number
-  updated_at: number
-  share_type: 'private' | 'password_protected' | 'signed_url'
-  expires_at: number | null
-}
-
-/** `GET /api/tree` response: two flat lists. */
-export interface TreeData {
-  folders: TreeFolder[]
-  notes: TreeNote[]
-}
+import type { TreeData, TreeFolder, TreeNote } from './api'
 
 interface TreeItemBase {
   id: string
@@ -64,9 +38,9 @@ function compareItems(a: TreeItem, b: TreeItem): number {
 /**
  * Builds the nested, sorted tree from the flat `GET /api/tree` lists.
  *
- * Orphan-safe: an item whose parent folder is missing is placed at the root, and folders caught
- * in a parent cycle (which the server forbids, but a stale cache could momentarily show) are
- * attached at the root too, so every folder and note appears exactly once.
+ * Orphan-safe: an item whose parent folder is missing (e.g. a cache mid-update) is placed at the root.
+ * Parent cycles cannot occur (the server rejects them and moves into a folder's own subtree are
+ * never offered); each folder is still visited at most once, so a bad cache can never loop forever.
  */
 export function buildTree(folders: TreeFolder[], notes: TreeNote[]): TreeItem[] {
   const folderIds = new Set(folders.map((f) => f.id))
@@ -111,27 +85,7 @@ export function buildTree(folders: TreeFolder[], notes: TreeNote[]): TreeItem[] 
     return items
   }
 
-  const roots = attach(childrenOf.get(null) ?? [], null, 0)
-  // folders unreachable from the root form a parent cycle: break it at the first one by name
-  const unreached = folderItems.filter((f) => !visited.has(f.id)).sort(compareItems)
-  if (unreached.length === 0) return roots
-  for (const item of unreached) roots.push(...attach([item], null, 0))
-  return roots.sort(compareItems)
-}
-
-/** Ids of every folder in the (sub)tree, depth-first. */
-export function collectFolderIds(items: TreeItem[]): string[] {
-  const ids: string[] = []
-  const walk = (list: TreeItem[]) => {
-    for (const item of list) {
-      if (item.kind === 'folder') {
-        ids.push(item.id)
-        walk(item.children)
-      }
-    }
-  }
-  walk(items)
-  return ids
+  return attach(childrenOf.get(null) ?? [], null, 0)
 }
 
 /**

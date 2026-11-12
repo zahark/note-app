@@ -7,7 +7,6 @@ import * as attachmentsRepo from '../src/repos/attachments.js'
 import {
   createAttachment,
   getAttachment,
-  listNoteAttachmentIds,
   setNoteAttachments,
 } from '../src/repos/attachments.js'
 import * as foldersRepo from '../src/repos/folders.js'
@@ -47,6 +46,10 @@ beforeEach(() => {
 afterEach(() => {
   db.close()
 })
+
+/** Ids of the attachments linked to `noteId`, sorted. */
+const linkedIds = (noteId: string): string[] =>
+  db.prepare('SELECT attachment_id FROM note_attachments WHERE note_id = ? ORDER BY attachment_id').pluck().all(noteId) as string[]
 
 const count = (sql: string, ...params: unknown[]): number =>
   db.prepare(sql).pluck().get(...params) as number
@@ -103,7 +106,6 @@ describe('owner-scoped repos require a userId', () => {
         'attachments.createAttachment',
         'attachments.getAttachment',
         'attachments.setNoteAttachments',
-        'attachments.listNoteAttachmentIds',
         'access.resolveAccess',
       ]),
     )
@@ -368,16 +370,16 @@ describe('attachments repo', () => {
     const foreign = newAttachment(bob)
     const note = createNote(db, alice, { folderId: null })!
     expect(setNoteAttachments(db, alice, note.id, [a.id, b.id, foreign.id, randomUUID()])).toBe(true)
-    expect(listNoteAttachmentIds(db, alice, note.id)).toEqual([a.id, b.id].sort())
+    expect(linkedIds(note.id)).toEqual([a.id, b.id].sort())
 
     expect(setNoteAttachments(db, alice, note.id, [b.id, c.id, c.id])).toBe(true)
-    expect(listNoteAttachmentIds(db, alice, note.id)).toEqual([b.id, c.id].sort())
+    expect(linkedIds(note.id)).toEqual([b.id, c.id].sort())
     // the dropped link was stamped by the trigger; the kept ones were not
     expect(getAttachment(db, alice, a.id)?.last_unlinked_at).not.toBeNull()
     expect(getAttachment(db, alice, b.id)?.last_unlinked_at).toBeNull()
   })
 
-  it('setNoteAttachments on another user’s or a missing note changes nothing; listing it is empty', () => {
+  it('setNoteAttachments on another user’s or a missing note changes nothing', () => {
     const own = newAttachment(bob)
     const att = newAttachment(alice)
     const note = createNote(db, alice, { folderId: null })!
@@ -385,8 +387,7 @@ describe('attachments repo', () => {
     expect(setNoteAttachments(db, bob, note.id, [own.id])).toBe(false)
     expect(setNoteAttachments(db, bob, note.id, [])).toBe(false)
     expect(setNoteAttachments(db, alice, randomUUID(), [att.id])).toBe(false)
-    expect(listNoteAttachmentIds(db, alice, note.id)).toEqual([att.id])
-    expect(listNoteAttachmentIds(db, bob, note.id)).toEqual([])
+    expect(linkedIds(note.id)).toEqual([att.id])
     expect(count('SELECT COUNT(*) FROM note_attachments')).toBe(1)
   })
 })

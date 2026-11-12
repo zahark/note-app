@@ -33,6 +33,11 @@ export function findSession(db: Db, tokenHash: string, nowSec: number): SessionW
     .get(tokenHash, nowSec) as SessionWithUser | undefined
 }
 
+/** Moves session `sessionId`'s expiry to `expiresAt` (sliding renewal). */
+export function extendSession(db: Db, sessionId: string, expiresAt: number): void {
+  db.prepare('UPDATE sessions SET expires_at = ? WHERE id = ?').run(expiresAt, sessionId)
+}
+
 export function deleteSessionByTokenHash(db: Db, tokenHash: string): void {
   db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash)
 }

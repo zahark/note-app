@@ -4,7 +4,6 @@ import path from 'node:path'
 import { buildApp, defaultWebDir } from './app.js'
 import { ConfigError, loadConfig, type Config } from './config.js'
 import { openDataDb } from './db/index.js'
-import { appInfo } from './meta.js'
 
 async function main(): Promise<void> {
   let config: Config
@@ -34,8 +33,7 @@ async function main(): Promise<void> {
   app.addHook('onClose', async () => {
     db.close()
   })
-  const { name, version } = appInfo()
-  app.log.info(`${name} server ${version} starting`)
+  app.log.info('notes-app server starting')
   if (!hasWebBuild) app.log.warn(`no web build at ${webDir}; serving the API only`)
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {

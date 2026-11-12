@@ -28,6 +28,11 @@ export function touchKnownDevice(db: Db, id: string, nowSec: number): void {
   db.prepare('UPDATE known_devices SET last_used_at = ? WHERE id = ?').run(nowSec, id)
 }
 
+/** Forgets `userId`'s devices last used at or before `cutoffSec` (expired). Returns the number deleted. */
+export function deleteExpiredKnownDevices(db: Db, userId: string, cutoffSec: number): number {
+  return db.prepare('DELETE FROM known_devices WHERE user_id = ? AND last_used_at <= ?').run(userId, cutoffSec).changes
+}
+
 /** Forgets every known device of `userId` (after a password change or reset). Returns the number deleted. */
 export function deleteUserKnownDevices(db: Db, userId: string): number {
   return db.prepare('DELETE FROM known_devices WHERE user_id = ?').run(userId).changes

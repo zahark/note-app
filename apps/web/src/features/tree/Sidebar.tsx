@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
 import { FilePlusIcon, FolderPlusIcon } from 'lucide-react'
-import { useSearchParams } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { useCreateFolder, useCreateNote, useTree } from './api'
 import { buildTree, subtreeFolderIds, type TreeItem } from './buildTree'
@@ -10,9 +9,7 @@ import { MoveDialog } from './MoveDialog'
 import { useDeleteFolder, useDeleteNote, useMoveFolder, useMoveNote, useRenameFolder, useRenameNote } from './mutations'
 import { TreeNode, type TreeHandlers } from './TreeNode'
 import { useExpanded } from './useExpanded'
-
-/** Query-string key holding the open note's id (`/?note=<id>`). */
-export const NOTE_PARAM = 'note'
+import { useOpenNote } from './useOpenNote'
 
 /**
  * Sidebar: header with "New note" / "New folder" (created inside the selected folder, or the
@@ -26,8 +23,7 @@ export function Sidebar() {
   const createFolder = useCreateFolder()
   const createNote = useCreateNote()
   const { expanded, toggle, expand } = useExpanded()
-  const [searchParams, setSearchParams] = useSearchParams()
-  const openNoteId = searchParams.get(NOTE_PARAM)
+  const { noteId: openNoteId, openNote: showNote, closeNote } = useOpenNote()
   // a clicked folder takes the selection; otherwise the open note is the selection
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -46,27 +42,16 @@ export function Sidebar() {
 
   const selectedFolder = folders?.find((f) => f.id === selectedFolderId)
   const selectedId = selectedFolder?.id ?? openNoteId
-  // where "New note" / "New folder" create: the selected folder, else the open note's folder, else the root
-  const targetFolderId = selectedFolder
-    ? selectedFolder.id
-    : (notes?.find((n) => n.id === openNoteId)?.folder_id ?? null)
-  const targetFolder = folders?.find((f) => f.id === targetFolderId)
+  const openNoteFolderId = notes?.find((n) => n.id === openNoteId)?.folder_id ?? null
+  // where "New note" / "New folder" create: the selected folder, else the open note's folder (if it still
+  // exists), else the root
+  const targetFolder = selectedFolder ?? folders?.find((f) => f.id === openNoteFolderId)
+  const targetFolderId = targetFolder?.id ?? null
 
   const openNote = (id: string) => {
     setSelectedFolderId(null)
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      next.set(NOTE_PARAM, id)
-      return next
-    })
+    showNote(id)
   }
-
-  const closeNote = () =>
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      next.delete(NOTE_PARAM)
-      return next
-    })
 
   const commitRename = (item: TreeItem, value: string) => {
     setRenamingId(null)
@@ -89,8 +74,7 @@ export function Sidebar() {
   const remove = (item: TreeItem) => {
     if (item.kind === 'folder') {
       const removed = subtreeFolderIds(folders ?? [], item.id)
-      const openNoteFolder = notes?.find((n) => n.id === openNoteId)?.folder_id
-      if (openNoteFolder && removed.has(openNoteFolder)) closeNote()
+      if (openNoteFolderId && removed.has(openNoteFolderId)) closeNote()
       if (selectedFolderId && removed.has(selectedFolderId)) setSelectedFolderId(null)
       deleteFolder.mutate({ id: item.id })
     } else {
@@ -137,7 +121,6 @@ export function Sidebar() {
     )
 
   const creating = createNote.isPending || createFolder.isPending
-  const target = targetFolder?.id ?? null
 
   return (
     <>
@@ -146,7 +129,14 @@ export function Sidebar() {
           <div className="font-semibold leading-tight">Notes</div>
           <div className="truncate text-xs text-muted-foreground">{targetFolder ? `in ${targetFolder.name}` : 'at root'}</div>
         </div>
-        <Button variant="ghost" size="icon-sm" aria-label="New note" title="New note" disabled={creating} onClick={() => newNote(target)}>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="New note"
+          title="New note"
+          disabled={creating}
+          onClick={() => newNote(targetFolderId)}
+        >
           <FilePlusIcon />
         </Button>
         <Button
@@ -155,7 +145,7 @@ export function Sidebar() {
           aria-label="New folder"
           title="New folder"
           disabled={creating}
-          onClick={() => newFolder(target)}
+          onClick={() => newFolder(targetFolderId)}
         >
           <FolderPlusIcon />
         </Button>

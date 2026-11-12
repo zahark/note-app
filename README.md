@@ -6,18 +6,23 @@ serves the API and the built SPA, and all state lives in one data directory.
 
 ## Features
 
-- Nested folders and notes in a sidebar tree: create, rename, delete (cascades), drag and drop or
-  "Move to…", with folder cycles rejected in the UI and on the server.
+- Nested folders and notes in a sidebar tree: create, rename, delete (cascades), move by drag and drop
+  or "Move to…", with folder cycles rejected in the UI and on the server. Drag and drop works with a
+  mouse or the keyboard (Space picks an item up, arrow keys move it, Space drops, Escape cancels);
+  touch screens have no drag — long-press an item or use its "…" menu → "Move to…".
 - TipTap rich-text editor with debounced autosave (a stale save gets a conflict prompt instead of
   overwriting) and image upload by button, drag or paste (PNG/JPEG/WebP/GIF, 10 MB max).
-- Sharing with no public access by default, per note:
+- Sharing with no public access by default, per note, from the **Share** button in the open note's
+  header:
   - **PIN**: an 8-character PIN shown once; visitors unlock a read-only view (5 wrong PINs per note
     in 15 minutes lock it out).
   - **Expiring link**: an HMAC-signed link valid for 1 hour, 1 day, 7 days or 30 days.
   - Regenerating or stopping a share revokes the old PIN or link immediately. Every failure (wrong PIN,
     expired, revoked, missing) shows the same "unavailable" page.
 - Email + password accounts (argon2id, server-side sessions), change password in the app, reset from
-  the command line. The first account created is the **owner**.
+  the command line. The first account created is the **owner**; by default nobody else can sign up. A session lasts 30 days and is renewed
+  to a fresh 30 days while you keep using the app (once less than half of it is left); a browser stays
+  a known device for 1 year after its last login.
 - One container, one data directory: SQLite database plus uploaded images, backed up with one command.
 
 ## Quick start (Docker)
@@ -28,7 +33,8 @@ cp .env.example .env
 docker compose -f docker-compose.yml -f compose.direct.yml up -d --build
 ```
 
-Open `PUBLIC_ORIGIN` (e.g. `http://<host>:3000`) and sign up; that first account becomes the owner.
+Open `PUBLIC_ORIGIN` (e.g. `http://<host>:3000`) and sign up ("Create one" on the sign-in page); that
+first account becomes the owner, and signup then closes (see `ALLOW_SIGNUP`).
 `compose.direct.yml` is for a LAN or testing; see [Docker](#docker) for public deployments.
 
 ## Requirements
@@ -52,12 +58,13 @@ validates them at boot and refuses to start on any problem, listing every one.
 | `SESSION_SECRET` | required | At least 32 characters (`openssl rand -hex 32`). Session and device cookies are stored as HMACs keyed by it, so changing it signs everyone out. |
 | `SHARE_HMAC_KEY` | required | At least 32 characters. Signs expiring links and PIN unlock tokens; changing it invalidates every expiring link. |
 | `PUBLIC_ORIGIN` | required | Exact origin the app is served from (`scheme://host[:port]`, no path). Every mutating request must send it as `Origin` (CSRF check); `https` adds the `Secure` cookie flag. Dev: `http://localhost:5173`. |
-| `TRUST_PROXY` | unset (trust nothing) | Hop count (`1`) or comma-separated proxy IPs/CIDRs; a bare `true` is rejected. Set it only when the app port is reachable solely through that proxy. |
-| `ALLOW_SIGNUP` | `true` | Allow new accounts. Set `false` once the owner exists on a public deployment. |
+| `TRUST_PROXY` | unset (trust nothing) | Hop count (`1`) or comma-separated proxy IPs/CIDRs; `0` is the same as unset and a bare `true` is rejected. Set it only when the app port is reachable solely through that proxy. |
+| `ALLOW_SIGNUP` | unset (first account only) | Who can sign up. Unset: only while no account exists, so the owner can create theirs on first run; after that signup is closed. `true`/`1`: anyone, any time (more accounts). `false`/`0`: nobody, not even on an empty database (the owner must already exist, e.g. restored from a backup). Any other value refuses to boot. The sign-in page offers "Create one" only while signup is open. |
 | `DATA_DIR` | `./data` | Holds `notes.db` and `uploads/`. A relative path resolves against the server's working directory (`apps/server` when run through npm). Docker always uses `/data`. |
 | `HOST` | `0.0.0.0` | Listen address. |
 | `PORT` | `3000` | Listen port. |
 | `LOG_LEVEL` | `info` | `fatal` … `trace`; `debug` logs each request's client address and rate-limit IP key. |
+| `UPLOAD_QUOTA_MB` | `1024` | Most image storage one account may use, in MB (integer; `0` = no limit). Uploads past it get 413 `QUOTA_EXCEEDED`. Removed images still count until the sweep deletes them, 7 days after removal. |
 | `CLOUDFLARE_TUNNEL_TOKEN` | unset | `compose.tunnel.yml` only. |
 
 ## Development
@@ -65,12 +72,20 @@ validates them at boot and refuses to start on any problem, listing every one.
 ```sh
 npm install
 cp .env.example .env   # fill in the secrets
+set -a; . ./.env; set +a   # the server reads only environment variables; .env is not loaded automatically
 npm run dev            # server and web dev servers together (web proxies /api to :3000)
 npm test               # all tests in both apps
 npm run test:e2e       # Playwright smoke test (builds, then runs the compiled server on :3100 with a temp DATA_DIR;
-                       # first time: npx playwright install chromium)
+                       # first time: npx playwright install chromium; E2E_PORT=3200 npm run test:e2e picks another port)
 npm run lint           # ESLint + TypeScript type checks
 npm run build          # production build of both apps
+```
+
+Single test files:
+
+```sh
+npm test -w apps/server -- test/move.test.ts
+npm test -w apps/web -- src/features/tree/dnd.test.ts
 ```
 
 ## Running without Docker
@@ -97,7 +112,9 @@ cp .env.example .env   # set SESSION_SECRET, SHARE_HMAC_KEY (openssl rand -hex 3
 `docker-compose.yml` is the base: it publishes **no** port, puts the app on a network with the fixed
 subnet `172.30.0.0/24`, and stores `/data` in the **named volume** `notes-data`. Compose refuses to start
 without the secrets and `PUBLIC_ORIGIN`; the server refuses to boot when a secret is shorter than 32
-characters. Pick exactly one deployment override:
+characters. `.env` itself is optional to Compose (Docker Compose 2.24 or newer), but the optional
+settings (`LOG_LEVEL`, `ALLOW_SIGNUP`, ...) reach the container only through it. Pick exactly one
+deployment override:
 
 | Deployment | Command | Port | `TRUST_PROXY` |
 | --- | --- | --- | --- |
@@ -140,8 +157,24 @@ the host first, or the app cannot write to it.
 - Login is rate-limited per IP key, per (account, IP key) and by a per-account delay gate. Browsers that
   have logged in before (known devices) skip the delay gate, but a **brand-new device may have to wait
   out the login delay while someone is attacking the account**.
-- `ALLOW_SIGNUP` defaults to `true`; on a public deployment set `ALLOW_SIGNUP=false` once the owner
-  account (the first account created) exists.
+- Rate limits ("IP key" = the client IPv4 address, or its IPv6 /64):
+  - failed logins: 30 per 15 minutes per IP key, 10 per 15 minutes per (account, IP key);
+  - successful logins: 20 per 15 minutes per account and per IP key;
+  - signups: 5 per hour per IP key; password changes: 5 per 15 minutes per account;
+  - PIN unlocks: 30 attempts per 15 minutes per IP key, 5 wrong PINs per 15 minutes per note.
+  - image uploads: 100 per 15 minutes per account;
+  - note creation: 60 per 15 minutes per account; note content saves: 600 per 15 minutes per account
+    (autosave saves at most about once a second while you type, and retries a refused save).
+- All rate-limit state is kept in memory: a restart clears it, and the app must run as a **single
+  process** (one container/replica, no horizontal scaling) for the limits to hold.
+- A session lasts 30 days; using it with less than 15 days left renews it to a fresh 30 days, so an
+  unused session expires after 15 to 30 days. Known devices expire 1 year after their last login.
+- Signup is open only until the first account (the owner) exists, unless `ALLOW_SIGNUP=true`. Create
+  the owner account right after the first start: until then, anyone who reaches the app can claim it.
+- Each account may store at most `UPLOAD_QUOTA_MB` (default 1024 MB) of images, the owner included.
+  Note content has no size quota (only the write rate limits above and a 5 MB limit per save), so every
+  account can grow the data volume, which also holds the database. Only allow accounts you trust:
+  `ALLOW_SIGNUP=true` on a public deployment lets strangers create accounts that can fill the disk.
 
 Commands inside the container (from the same directory, with the same `-f` files):
 
@@ -159,10 +192,14 @@ file) and `uploads.tar.gz` (every uploaded image the database copy references, a
 command from.
 
 ```sh
-npm run backup                                      # bare metal
+npm run backup                                      # bare metal (see below for DATA_DIR)
 docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run backup
 docker compose -f docker-compose.yml -f compose.direct.yml cp app:/data/backups ./backups
 ```
+
+Bare metal: the CLIs read `DATA_DIR` only from the environment, not from `.env`, so export the same
+environment as the server first (`set -a; . ./.env; set +a`) or prefix the command with
+`DATA_DIR=/path/to/data`. Otherwise they fall back to `apps/server/data`.
 
 Backups made inside the container land in the `notes-data` volume (`/data/backups`); copy them off the
 host as shown and delete old ones from time to time.
@@ -185,6 +222,7 @@ access to the server resets any account with:
 
 ```sh
 npm run build -w apps/server                # once, if dist/ is not built yet
+set -a; . ./.env; set +a                    # or prefix DATA_DIR=/path/to/data (.env is not read automatically)
 npm run reset-password -- you@example.com   # prompts twice for the new password, without echo
 ```
 

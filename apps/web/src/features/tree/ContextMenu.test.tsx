@@ -1,7 +1,8 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockFetch, renderWithProviders, type MockResponse, type RecordedRequest } from '@/test/utils'
-import { countFolderContents, subtreeFolderIds, type FolderItem, type TreeData, type TreeFolder, type TreeNote } from './buildTree'
+import type { TreeData, TreeFolder, TreeNote } from './api'
+import { countFolderContents, subtreeFolderIds, type FolderItem } from './buildTree'
 import { removeFolderFromTree } from './mutations'
 import { deleteDescription } from './treeOps'
 import { Sidebar } from './Sidebar'
@@ -187,6 +188,28 @@ describe('inline rename', () => {
     expect(await screen.findByText('Could not rename folder: Server exploded')).toBeInTheDocument()
     expect(treeItem('Work')).toBeInTheDocument()
     expect(screen.queryByRole('treeitem', { name: 'Office' })).not.toBeInTheDocument()
+  })
+
+  it('refetches the tree after a refused change and shows the server’s copy', async () => {
+    const response = deferred()
+    let treeCalls = 0
+    const { user, requests } = setup({
+      // the second load (the refetch after the failure) has a change made elsewhere meanwhile
+      'GET /api/tree': () =>
+        treeCalls++ === 0
+          ? { body: tree }
+          : { body: { ...tree, folders: tree.folders.map((f) => (f.id === 'f-arch' ? { ...f, name: 'Old stuff' } : f)) } },
+      'PATCH /api/folders/f-work': () => response.promise,
+    })
+    const input = await startRename(user, 'Work')
+    await user.clear(input)
+    await user.type(input, 'Office{Enter}')
+    expect(requests.filter((r) => r.path === '/api/tree')).toHaveLength(1)
+
+    response.release({ status: 500, body: { error: { code: 'INTERNAL', message: 'Server exploded' } } })
+    expect(await screen.findByRole('treeitem', { name: 'Old stuff' })).toBeInTheDocument()
+    expect(requests.filter((r) => r.path === '/api/tree')).toHaveLength(2)
+    expect(treeItem('Work')).toBeInTheDocument()
   })
 
   it('puts a newly created folder straight into rename mode', async () => {

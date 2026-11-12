@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Database } from 'better-sqlite3'
+import type { Db } from './index.js'
 
 /** Directory holding the numbered `NNN_name.sql` migrations (copied next to the compiled JS on build). */
 export const MIGRATIONS_DIR = fileURLToPath(new URL('./migrations/', import.meta.url))
@@ -41,7 +41,7 @@ export function loadMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
  * Each migration runs in its own transaction together with its bookkeeping row, so a failing
  * migration leaves no partial schema behind. Safe to call on every boot. Returns the versions applied.
  */
-export function migrate(db: Database, dir: string = MIGRATIONS_DIR): number[] {
+export function migrate(db: Db, dir: string = MIGRATIONS_DIR): number[] {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version    INTEGER PRIMARY KEY,
     name       TEXT NOT NULL,

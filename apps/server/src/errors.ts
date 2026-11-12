@@ -26,7 +26,6 @@ export const badRequest = (message = 'Bad request', code = 'BAD_REQUEST') =>
   new AppError(400, code, message)
 export const unauthorized = (message = 'Authentication required') =>
   new AppError(401, 'UNAUTHORIZED', message)
-export const forbidden = (message = 'Forbidden') => new AppError(403, 'FORBIDDEN', message)
 export const notFound = (message = 'Not found') => new AppError(404, 'NOT_FOUND', message)
 export const conflict = (message = 'Conflict', code = 'CONFLICT') => new AppError(409, code, message)
 /** 429; with `retryAfterMs`, also sends `Retry-After` in whole seconds (at least 1). */
@@ -39,6 +38,8 @@ export const tooManyRequests = (message = 'Too many requests', retryAfterMs?: nu
       ? {}
       : { 'retry-after': String(Math.max(1, Math.ceil(retryAfterMs / 1000))) },
   )
+export const unsupportedMediaType = (message: string) =>
+  new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', message)
 export const serviceUnavailable = (message = 'Server busy, try again shortly') =>
   new AppError(503, 'BUSY', message)
 

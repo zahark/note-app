@@ -19,6 +19,13 @@ export function parseAttachmentSrc(src: unknown): string | null {
   return UUID.test(aid) ? aid : null
 }
 
+/** The attachment an `<img>` refers to: our clipboard's `data-attachment-id`, else an `attachment://` src. */
+function elementAttachmentId(element: HTMLElement): string | null {
+  const aid = element.getAttribute('data-attachment-id')
+  if (aid && UUID.test(aid)) return aid
+  return parseAttachmentSrc(element.getAttribute('src'))
+}
+
 /**
  * Maps an attachment id to a URL the browser can load: the owner's `/api/attachments/:aid`,
  * or a blob URL fetched by the shared view. May be async; it is only ever called by the node view.
@@ -26,7 +33,7 @@ export function parseAttachmentSrc(src: unknown): string | null {
 export type AttachmentResolver = (aid: string) => string | Promise<string>
 
 export interface AttachmentImageOptions extends ImageOptions {
-  /** Resolves `attachment://<aid>` for display. Without one the src is shown as stored. */
+  /** Resolves `attachment://<aid>` for display. Without one the reference is shown as stored. */
   resolveAttachment: AttachmentResolver | null
 }
 
@@ -42,7 +49,9 @@ const DISPLAY_ATTRIBUTES = ['alt', 'title', 'width', 'height'] as const
  *   `data-attachment-id`; `parseHTML` reads either back into `attachment://<aid>`. So copy, cut and
  *   paste, within a note or across notes, keep the reference, and `getJSON()` never contains a
  *   private route.
- * - Any other src is displayed unchanged.
+ * - Only attachment images exist: a pasted `<img>` with any other src (a third-party URL, `data:`) is
+ *   dropped, and such a src already in stored content is never loaded, so neither the owner's nor
+ *   a shared-note visitor's browser ever fetches an outside URL. Image files are uploaded instead.
  */
 export const AttachmentImage = Image.extend<AttachmentImageOptions>({
   addOptions() {
@@ -58,20 +67,16 @@ export const AttachmentImage = Image.extend<AttachmentImageOptions>({
       src: {
         default: null,
         parseHTML: (element: HTMLElement) => {
-          const aid = element.getAttribute('data-attachment-id')
-          if (aid && UUID.test(aid)) return attachmentSrc(aid)
-          return element.getAttribute('src')
+          const aid = elementAttachmentId(element)
+          return aid ? attachmentSrc(aid) : null
         },
       },
     }
   },
 
   parseHTML() {
-    return [
-      // our own clipboard HTML: the reference wins over whatever the src says
-      { tag: 'img[data-attachment-id]', priority: 60 },
-      { tag: 'img[src]:not([src^="data:"])' },
-    ]
+    // our own clipboard HTML (the reference wins over whatever the src says) or an attachment:// src
+    return [{ tag: 'img', getAttrs: (element) => (elementAttachmentId(element) ? null : false) }]
   },
 
   renderHTML({ HTMLAttributes }) {
@@ -101,21 +106,16 @@ export const AttachmentImage = Image.extend<AttachmentImageOptions>({
         if (aid) img.setAttribute('data-attachment-id', aid)
         else img.removeAttribute('data-attachment-id')
 
-        if (typeof src !== 'string' || src === '') {
+        // anything but an attachment is never loaded (no request to an outside URL)
+        if (!aid) {
           img.removeAttribute('src')
           return
         }
-        if (!aid || !resolve) {
-          img.setAttribute('src', src)
+        if (!resolve) {
+          img.setAttribute('src', attachmentSrc(aid))
           return
         }
-        let resolved: string | Promise<string>
-        try {
-          resolved = resolve(aid)
-        } catch {
-          img.removeAttribute('src')
-          return
-        }
+        const resolved = resolve(aid)
         if (typeof resolved === 'string') {
           img.setAttribute('src', resolved)
           return

@@ -9,14 +9,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import type { TreeData, TreeItem } from './buildTree'
-import { moveDestinations } from './treeOps'
-
-/** The folder `item` currently sits in, per the latest tree (null = root). */
-function currentParent(tree: TreeData, item: TreeItem): string | null {
-  if (item.kind === 'folder') return tree.folders.find((f) => f.id === item.id)?.parent_folder_id ?? null
-  return tree.notes.find((n) => n.id === item.id)?.folder_id ?? null
-}
+import type { TreeData } from './api'
+import type { TreeItem } from './buildTree'
+import { moveDestinations, TREE_INDENT_PX } from './treeOps'
 
 interface MoveDialogProps {
   /** The folder or note being moved; null = dialog closed. */
@@ -63,7 +58,8 @@ function MoveForm({
   onCancel: () => void
 }) {
   const destinations = useMemo(() => moveDestinations(tree, item), [tree, item])
-  const current = currentParent(tree, item)
+  // where the item is shown in the tree (an orphan is shown at the root), as for drag and drop
+  const current = item.parentId
   const [selected, setSelected] = useState<string | null | undefined>(undefined)
 
   const submit = (event: FormEvent) => {
@@ -86,7 +82,7 @@ function MoveForm({
             <label
               key={value}
               className="flex h-8 cursor-pointer items-center gap-2 rounded-md pr-2 text-sm has-checked:bg-accent has-focus-visible:ring-2 has-focus-visible:ring-ring/50 has-disabled:cursor-default has-disabled:opacity-50"
-              style={{ paddingLeft: dest.depth * 12 + 8 }}
+              style={{ paddingLeft: dest.depth * TREE_INDENT_PX + 8 }}
             >
               <input
                 type="radio"

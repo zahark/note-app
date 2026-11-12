@@ -18,9 +18,3 @@ export function validateEmail(email: string): string | null {
   if (trimmed.length > 254 || !EMAIL_RE.test(trimmed)) return 'Enter a valid email address'
   return null
 }
-
-/** User-facing text for a failed request. */
-export function errorMessage(err: unknown): string {
-  if (err instanceof Error && err.message) return err.message
-  return 'Something went wrong, try again'
-}

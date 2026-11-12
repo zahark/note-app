@@ -1,12 +1,12 @@
 import { createElement } from 'react'
 import type { Editor, JSONContent } from '@tiptap/core'
-import { act, fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import type { TreeData } from '@/features/tree/buildTree'
-import { treeQueryKey } from '@/features/tree/api'
+import { treeQueryKey, type TreeData } from '@/features/tree/api'
+import { MOBILE_QUERY } from '@/hooks/useMediaQuery'
 import { mockFetch, renderApp, renderWithProviders, testUser, type MockResponse } from '@/test/utils'
-import { NotePane } from './Editor'
+import { NotePane } from './NotePane'
 
 const NOTE_ID = '22222222-2222-4222-8222-222222222222'
 const AID = '0b4c2f7e-1d2a-4c3b-9e8f-0123456789ab'
@@ -131,6 +131,42 @@ describe('note loading and empty states', () => {
     const other = renderApp('/')
     expect(await other.findByText('Select a note or create a new one.')).toBeInTheDocument()
   })
+
+  it('opening a note from the sidebar does not refetch the tree', async () => {
+    const { requests } = mockFetch({
+      'GET /api/auth/me': { body: { user: testUser } },
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Opened')) } },
+    })
+    renderApp('/')
+    await userEvent.click(await screen.findByRole('button', { name: 'My note' }))
+    expect((await findEditor()).getText()).toBe('Opened')
+    expect(requests.filter((r) => r.path === '/api/tree')).toHaveLength(1)
+  })
+
+  it('on a phone, opening a note from the drawer closes it and shows the note', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === MOBILE_QUERY,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    )
+    mockFetch({
+      'GET /api/auth/me': { body: { user: testUser } },
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Opened')) } },
+    })
+    renderApp('/')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Open sidebar' }))
+    const drawer = await screen.findByRole('dialog')
+    await user.click(await within(drawer).findByRole('button', { name: 'My note' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect((await findEditor()).getText()).toBe('Opened')
+  })
 })
 
 describe('title field', () => {
@@ -144,7 +180,7 @@ describe('title field', () => {
   }
 
   it('saves the title through PATCH /api/notes/:id {title} on blur, not through autosave', async () => {
-    const { requests, client } = setup()
+    const { requests, client, unmount } = setup()
     await findEditor()
     const user = userEvent.setup()
     const input = screen.getByLabelText('Note title')
@@ -159,8 +195,11 @@ describe('title field', () => {
     expect(patch.body).toEqual({ title: 'Renamed' })
     // the sidebar's tree shows the new title at once
     expect(client.getQueryData<TreeData>(treeQueryKey)!.notes[0]!.title).toBe('Renamed')
-    // a title change is never sent as content
-    await new Promise((r) => setTimeout(r, 1200))
+    // a title change is never sent as content: nothing is pending, and closing the note (which
+    // flushes pending content without waiting for the debounce) sends no content save
+    expect(screen.getByRole('status', { name: 'Save status' })).toHaveTextContent('Saved')
+    unmount()
+    await Promise.resolve()
     expect(requests.some((r) => r.method === 'PUT')).toBe(false)
   })
 
@@ -282,6 +321,25 @@ describe('image upload', () => {
     const editor = await findEditor()
     fireEvent.change(screen.getByTestId('image-file-input'), { target: { files: [png()] } })
     expect(await screen.findByText(/Could not upload cat\.png: Only PNG/)).toBeInTheDocument()
+    expect(imageSrcs(editor.getJSON())).toEqual([])
+  })
+
+  it.each([
+    [429, 'RATE_LIMITED', 'Too many image uploads, try again in a few minutes'],
+    [413, 'QUOTA_EXCEEDED', 'Image storage is full (1024 MB per account). Remove images you no longer need'],
+  ])('a %i %s response stops the batch with one message naming the skipped files', async (status, code, message) => {
+    const { requests } = mockFetch({
+      'GET /api/tree': treeWith(),
+      [`GET /api/notes/${NOTE_ID}`]: { body: { note: fullNote(text('Body')) } },
+      'POST /api/attachments': { status, body: { error: { code, message } } },
+    })
+    renderPane()
+    const editor = await findEditor()
+    act(() => void editor.view.dom.dispatchEvent(fileEvent('paste', [png('a.png'), png('b.png'), png('c.png')])))
+
+    expect(await screen.findByText(`Could not upload a.png: ${message} (2 more not uploaded)`)).toBeInTheDocument()
+    expect(requests.filter((r) => r.path === '/api/attachments')).toHaveLength(1)
+    expect(screen.queryByText(/Could not upload b\.png/)).not.toBeInTheDocument()
     expect(imageSrcs(editor.getJSON())).toEqual([])
   })
 })

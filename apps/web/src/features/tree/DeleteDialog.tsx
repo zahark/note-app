@@ -7,7 +7,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import type { TreeData, TreeItem } from './buildTree'
+import type { TreeData } from './api'
+import type { TreeItem } from './buildTree'
 import { deleteDescription } from './treeOps'
 
 interface DeleteDialogProps {

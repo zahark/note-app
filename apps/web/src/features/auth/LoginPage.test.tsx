@@ -2,7 +2,10 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockFetch, renderApp, testUser, unauthorizedResponse } from '@/test/utils'
 
-const signedOut = { 'GET /api/auth/me': unauthorizedResponse }
+const signedOut = {
+  'GET /api/auth/me': unauthorizedResponse,
+  'GET /api/auth/signup-status': { body: { open: true } },
+}
 
 async function fillLogin(email: string, password: string) {
   const user = userEvent.setup()
@@ -82,10 +85,32 @@ describe('LoginPage — sign in', () => {
 describe('LoginPage — sign up', () => {
   async function openSignup() {
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Create one' }))
+    await user.click(await screen.findByRole('button', { name: 'Create one' }))
     expect(screen.getByRole('heading', { name: 'Create account' })).toBeInTheDocument()
     return user
   }
+
+  it('does not offer sign up when the server has closed it', async () => {
+    const { requests } = mockFetch({
+      ...signedOut,
+      'GET /api/auth/signup-status': { body: { open: false } },
+    })
+    renderApp('/login')
+    expect(await screen.findByText('New accounts cannot be created on this server.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Create one' })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
+    expect(requests.some((r) => r.path === '/api/auth/signup-status')).toBe(true)
+  })
+
+  it('still offers sign up when the status cannot be read (the server decides)', async () => {
+    mockFetch({
+      ...signedOut,
+      'GET /api/auth/signup-status': { status: 500, body: { error: { code: 'INTERNAL', message: 'boom' } } },
+    })
+    renderApp('/login')
+    await openSignup()
+    expect(screen.queryByText('New accounts cannot be created on this server.')).not.toBeInTheDocument()
+  })
 
   it('enforces the password policy and confirmation before calling the API', async () => {
     const { requests } = mockFetch(signedOut)

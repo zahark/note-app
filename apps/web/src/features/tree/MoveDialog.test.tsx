@@ -1,7 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockFetch, renderWithProviders, type MockResponse, type RecordedRequest } from '@/test/utils'
-import { buildTree, type TreeData, type TreeFolder, type TreeItem, type TreeNote } from './buildTree'
+import type { TreeData, TreeFolder, TreeNote } from './api'
+import { buildTree, type TreeItem } from './buildTree'
 import { moveDestinations } from './treeOps'
 import { Sidebar } from './Sidebar'
 
@@ -79,7 +80,7 @@ describe('moveDestinations', () => {
 
   it('terminates on a folder cycle in a stale cache', () => {
     const cyclic: TreeData = { folders: [folder('a', 'A', 'b'), folder('b', 'B', 'a')], notes: [] }
-    const item = findItem(buildTree(cyclic.folders, []), 'a')
+    const item: TreeItem = { kind: 'folder', id: 'a', name: 'A', parentId: null, depth: 0, folder: cyclic.folders[0]!, children: [] }
     expect(moveDestinations(cyclic, item).map((d) => d.name)).toEqual(['Root'])
   })
 })
@@ -91,11 +92,14 @@ function deferred() {
   return { promise, release }
 }
 
-function setup(extra: Record<string, MockResponse | ((req: RecordedRequest) => Promise<MockResponse>)> = {}) {
+function setup(
+  extra: Record<string, MockResponse | ((req: RecordedRequest) => Promise<MockResponse>)> = {},
+  data: TreeData = tree,
+) {
   let treeCalls = 0
   const mocks = mockFetch({
     // later refetches never answer, so only the rollback itself can restore the tree
-    'GET /api/tree': () => (treeCalls++ === 0 ? { body: tree } : new Promise<MockResponse>(() => {})),
+    'GET /api/tree': () => (treeCalls++ === 0 ? { body: data } : new Promise<MockResponse>(() => {})),
     ...extra,
   })
   renderWithProviders(<Sidebar />)
@@ -117,6 +121,13 @@ describe('MoveDialog', () => {
     const options = within(dialog).getAllByRole('radio')
     expect(options.map((o) => o.getAttribute('aria-label'))).toEqual(['Root (current)', 'Archive'])
     expect(within(dialog).queryByRole('radio', { name: /Projects|Deep|Work/ })).not.toBeInTheDocument()
+  })
+
+  it('treats an orphan (its folder is gone) as being at the root, like drag and drop does', async () => {
+    const { user } = setup({}, { folders: tree.folders, notes: [note('n-orphan', 'Orphan', 'f-gone')] })
+    const dialog = await openMoveDialog(user, 'Orphan')
+    expect(within(dialog).getByRole('radio', { name: 'Root (current)' })).toBeDisabled()
+    expect(within(dialog).getByRole('radio', { name: 'Archive' })).toBeEnabled()
   })
 
   it('disables the current location and the Move button until another destination is chosen', async () => {

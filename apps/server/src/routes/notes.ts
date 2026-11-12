@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { conflict, notFound } from '../errors.js'
 import {
@@ -9,10 +9,32 @@ import {
   renameNote,
 } from '../repos/notes.js'
 import { saveContentWithAttachments } from '../services/attachments.js'
+import { RateLimiter, type Clock } from '../services/rateLimiter.js'
 import { moveNote } from '../services/tree.js'
+import { MIB, MINUTE_MS } from '../units.js'
 import { idParams, moveError, optionalFolderId, targetFolderId } from './schemas.js'
 
 const noteTitle = z.string().max(500)
+
+/**
+ * Per-account write limits (→ 429 with Retry-After). Autosave sends at most about one save per second
+ * per open note, so normal editing stays far below them; they cap how fast one account can write.
+ */
+export const NOTE_LIMITS = {
+  creates: { limit: 60, windowMs: 15 * MINUTE_MS },
+  contentSaves: { limit: 600, windowMs: 15 * MINUTE_MS },
+} as const
+
+export interface NoteRoutesOptions {
+  /** Clock for the write limits; a test seam. */
+  now?: Clock | undefined
+}
+
+/**
+ * Body limit of the content save (Fastify's default elsewhere is 1 MiB). Images are attachments, so this
+ * bounds text and structure only; a larger body gets 413 PAYLOAD_TOO_LARGE.
+ */
+export const NOTE_CONTENT_BODY_LIMIT = 5 * MIB
 
 const createNoteBody = z.strictObject({
   folder_id: optionalFolderId,
@@ -32,15 +54,34 @@ const saveContentBody = z.strictObject({
   version: z.number().int().positive(),
 })
 
+/** An `onRequest` hook counting the caller's requests against `limiter`, before the body is read. */
+function perUserLimit(limiter: RateLimiter, message: string) {
+  return async (request: FastifyRequest): Promise<void> => {
+    limiter.enforce(request.user!.id, message)
+  }
+}
+
 /**
  * `POST /api/notes`, `GET|PATCH|DELETE /api/notes/:id`, `PUT /api/notes/:id/content`,
  * `PATCH /api/notes/:id/move`.
- * Every route requires a session.
+ * Every route requires a session; creates and content saves are rate-limited per account (`NOTE_LIMITS`).
  */
-export async function noteRoutes(app: FastifyInstance): Promise<void> {
+export async function noteRoutes(
+  app: FastifyInstance,
+  { now = Date.now }: NoteRoutesOptions = {},
+): Promise<void> {
+  // route-level onRequest hooks run after this one, so `request.user` is set when they count
   app.addHook('onRequest', app.requireAuth)
+  const limitCreates = perUserLimit(
+    new RateLimiter({ ...NOTE_LIMITS.creates, now }),
+    'Too many notes created, try again in a few minutes',
+  )
+  const limitSaves = perUserLimit(
+    new RateLimiter({ ...NOTE_LIMITS.contentSaves, now }),
+    'Too many saves, try again in a few minutes',
+  )
 
-  app.post('/api/notes', async (request, reply) => {
+  app.post('/api/notes', { onRequest: limitCreates }, async (request, reply) => {
     const { folder_id, title } = createNoteBody.parse(request.body ?? {})
     // the repo checks the folder's ownership in the insert itself: foreign or missing → nothing inserted
     const note = createNote(app.db, request.user!.id, { folderId: folder_id, title })
@@ -72,7 +113,7 @@ export async function noteRoutes(app: FastifyInstance): Promise<void> {
     return { note: getNoteSummary(app.db, userId, id) }
   })
 
-  app.put('/api/notes/:id/content', async (request) => {
+  app.put('/api/notes/:id/content', { bodyLimit: NOTE_CONTENT_BODY_LIMIT, onRequest: limitSaves }, async (request) => {
     const { id } = idParams.parse(request.params)
     const { content, version } = saveContentBody.parse(request.body)
     // also rebuilds the note's attachment references from the content, in the same transaction

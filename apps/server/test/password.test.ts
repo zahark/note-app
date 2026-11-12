@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { resetPassword, ResetPasswordError } from '../src/cli/reset-password.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { CliError } from '../src/cli/common.js'
+import { resetPassword } from '../src/cli/reset-password.js'
 import { openDb, type Db } from '../src/db/index.js'
 import { createKnownDevice } from '../src/repos/knownDevices.js'
 import { createSession } from '../src/repos/sessions.js'
@@ -49,6 +50,17 @@ describe('POST /api/auth/change-password', () => {
     })
     expect(res.statusCode).toBe(401)
     expect(t.hasher.calls).toBe(1) // only the login in beforeEach
+  })
+
+  it('rejects a request without a session before parsing its body', async () => {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/auth/change-password',
+      headers: { origin: t.config.publicOrigin, 'content-type': 'application/json' },
+      payload: '{not json',
+    })
+    expect(res.statusCode).toBe(401)
+    expect(errorCode(res)).toBe('UNAUTHORIZED')
   })
 
   it('requires the exact Origin like every mutating request', async () => {
@@ -126,6 +138,20 @@ describe('POST /api/auth/change-password', () => {
     expect(count(t.db, 'SELECT COUNT(*) FROM known_devices WHERE user_id = ?', bobId)).toBe(1)
   })
 
+  it('a session revoked while the new password is hashing → 401; nothing changes, no device is registered', async () => {
+    t.hasher.blocked.add(NEW_PASSWORD)
+    const pending = changePassword(t.app, { sid, newPassword: NEW_PASSWORD })
+    await vi.waitFor(() => expect(t.hasher.active).toBe(1))
+    const devicesBefore = t.db.prepare('SELECT id FROM known_devices ORDER BY id').pluck().all()
+    t.db.prepare('DELETE FROM sessions').run()
+    t.hasher.release()
+    const res = await pending
+    expect(res.statusCode).toBe(401)
+    expect(cookie(res, 'did')).toBeUndefined()
+    expect(storedHash(t.db, userId)).toBe(`fake$${PASSWORD}`)
+    expect(t.db.prepare('SELECT id FROM known_devices ORDER BY id').pluck().all()).toEqual(devicesBefore)
+  })
+
   it('rejects a weak new password via validatePassword, with no argon2 call', async () => {
     const calls = t.hasher.calls
     for (const weak of ['short', 'x'.repeat(257)]) {
@@ -196,7 +222,7 @@ describe('resetPassword (reset CLI core)', () => {
   })
 
   it('errors on an unknown email and changes nothing', async () => {
-    await expect(resetPassword(db, 'nobody@example.com', NEW_PASSWORD, hasher)).rejects.toThrow(ResetPasswordError)
+    await expect(resetPassword(db, 'nobody@example.com', NEW_PASSWORD, hasher)).rejects.toThrow(CliError)
     expect(hasher.calls).toBe(0)
     expect(count(db, 'SELECT COUNT(*) FROM sessions')).toBe(2)
     expect(count(db, 'SELECT COUNT(*) FROM known_devices')).toBe(2)

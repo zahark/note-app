@@ -49,10 +49,6 @@ export class HashLimiter {
     this.maxWaitMs = maxWaitMs
   }
 
-  get inUse(): { general: number; reserved: number } {
-    return { general: this.generalInUse, reserved: this.reservedInUse }
-  }
-
   async run<T>(fn: () => Promise<T>, { reserved = false }: HashRunOptions = {}): Promise<T> {
     const kind = await this.acquire(reserved)
     try {

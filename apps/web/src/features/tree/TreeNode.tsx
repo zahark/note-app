@@ -3,7 +3,8 @@ import { ChevronRightIcon, FileTextIcon, FolderIcon, FolderOpenIcon } from 'luci
 import { cn } from 'cn'
 import type { TreeItem } from './buildTree'
 import { TreeItemContextMenu, TreeItemMenuButton } from './ContextMenu'
-import { useTreeRowDnd, type DropHighlight } from './dnd'
+import { MAX_NAME_LENGTH, TREE_INDENT_PX } from './treeOps'
+import { useTreeRowDnd, type DropHighlight } from './useTreeRowDnd'
 
 /** Callbacks shared by every row of the tree. */
 export interface TreeHandlers {
@@ -28,14 +29,9 @@ export interface TreeNodeProps {
   handlers: TreeHandlers
 }
 
-const INDENT_PX = 12
-
 /** Drop-target styling during a drag: the hovered folder is highlighted, unreachable ones dimmed. */
 const dropHighlightClass = (highlight: DropHighlight) =>
   cn(highlight === 'over' && 'bg-primary/15 ring-2 ring-primary/60', highlight === 'invalid' && 'opacity-40')
-
-/** Server limits: folder names 1–255 chars, note titles 0–500. */
-const MAX_LENGTH = { folder: 255, note: 500 } as const
 
 /** One folder (with its children when expanded) or note row of the sidebar tree. */
 export function TreeNode({ item, expanded, selectedId, renamingId, handlers }: TreeNodeProps) {
@@ -43,7 +39,7 @@ export function TreeNode({ item, expanded, selectedId, renamingId, handlers }: T
   const isOpen = isFolder && expanded.has(item.id)
   const isSelected = selectedId === item.id
   const isRenaming = renamingId === item.id
-  const indent = { paddingLeft: item.depth * INDENT_PX + 4 }
+  const indent = { paddingLeft: item.depth * TREE_INDENT_PX + 4 }
   const { setDragRef, dragAttributes, dragListeners, isDragging, setDropRef, highlight } = useTreeRowDnd(item, isRenaming)
   const actions = {
     onRename: () => handlers.onRename(item),
@@ -86,7 +82,7 @@ export function TreeNode({ item, expanded, selectedId, renamingId, handlers }: T
               <RenameInput
                 initial={item.kind === 'folder' ? item.folder.name : item.note.title}
                 label={`Rename ${item.kind}`}
-                maxLength={MAX_LENGTH[item.kind]}
+                maxLength={MAX_NAME_LENGTH[item.kind]}
                 onCommit={(value) => handlers.onRenameCommit(item, value)}
                 onCancel={handlers.onRenameCancel}
               />
@@ -138,7 +134,7 @@ export function TreeNode({ item, expanded, selectedId, renamingId, handlers }: T
             ))}
           </ul>
         ) : (
-          <p className="py-1 text-xs text-muted-foreground" style={{ paddingLeft: (item.depth + 1) * INDENT_PX + 24 }}>
+          <p className="py-1 text-xs text-muted-foreground" style={{ paddingLeft: (item.depth + 1) * TREE_INDENT_PX + 24 }}>
             Empty folder
           </p>
         ))}

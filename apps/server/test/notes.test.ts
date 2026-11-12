@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { NOTE_LIMITS } from '../src/routes/notes.js'
 import { closeApp, errorCode, makeApp, type TestApp } from './helpers/auth.js'
 import { api, doc, loginAs, type TestUser } from './helpers/api.js'
 
@@ -98,6 +99,18 @@ describe('GET /api/notes/:id', () => {
   it('returns 404 for a missing note', async () => {
     expect((await api(t.app, alice, 'GET', `/api/notes/${randomUUID()}`)).statusCode).toBe(404)
   })
+
+  it.each([101, 150])('a %i-char id gets the standard 404 error body (not the router’s 414)', async (n) => {
+    for (const [method, url] of [
+      ['GET', `/api/notes/${'x'.repeat(n)}`],
+      ['PUT', `/api/notes/${'x'.repeat(n)}/content`],
+      ['DELETE', `/api/folders/${'x'.repeat(n)}`],
+    ] as const) {
+      const res = await api(t.app, alice, method, url, method === 'PUT' ? { content: doc('x'), version: 1 } : undefined)
+      expect(res.statusCode).toBe(404)
+      expect(res.json()).toEqual({ error: { code: 'NOT_FOUND', message: expect.any(String) } })
+    }
+  })
 })
 
 describe('PUT /api/notes/:id/content', () => {
@@ -146,6 +159,30 @@ describe('PUT /api/notes/:id/content', () => {
   it('returns 404 for a missing note', async () => {
     const res = await saveContent(alice, randomUUID(), { content: doc('x'), version: 1 })
     expect(res.statusCode).toBe(404)
+  })
+
+  /** A doc whose JSON body is a little over `bytes` long. */
+  const docOfSize = (bytes: number) => doc('x'.repeat(bytes))
+
+  it('accepts a body over the 1 MiB default limit (up to 5 MiB)', async () => {
+    const { id } = await createNote(alice)
+    const res = await saveContent(alice, id, { content: docOfSize(2 * 1024 * 1024), version: 1 })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ version: 2 })
+  })
+
+  it('rejects a body over 5 MiB with 413 PAYLOAD_TOO_LARGE in the standard error format', async () => {
+    const { id } = await createNote(alice)
+    const res = await saveContent(alice, id, { content: docOfSize(5 * 1024 * 1024), version: 1 })
+    expect(res.statusCode).toBe(413)
+    expect(res.json()).toEqual({ error: { code: 'PAYLOAD_TOO_LARGE', message: expect.any(String) } })
+    expect((await getNote(alice, id)).version).toBe(1)
+  })
+
+  it('other routes keep the 1 MiB default', async () => {
+    const { id } = await createNote(alice)
+    const res = await api(t.app, alice, 'PATCH', `/api/notes/${id}`, { title: 'x'.repeat(2 * 1024 * 1024) })
+    expect(res.statusCode).toBe(413)
   })
 })
 
@@ -207,5 +244,42 @@ describe('DELETE /api/notes/:id', () => {
     expect(res.statusCode).toBe(204)
     expect(t.db.prepare('SELECT id FROM notes').pluck().all()).toEqual([keep.id])
     expect((await api(t.app, alice, 'DELETE', `/api/notes/${id}`)).statusCode).toBe(404)
+  })
+})
+
+describe('per-account write limits', () => {
+  it(`allows ${NOTE_LIMITS.creates.limit} note creations per 15 minutes per account, then 429 with Retry-After`, async () => {
+    for (let i = 0; i < NOTE_LIMITS.creates.limit; i++) await createNote(alice)
+    const res = await api(t.app, alice, 'POST', '/api/notes', {})
+    expect(res.statusCode).toBe(429)
+    expect(errorCode(res)).toBe('RATE_LIMITED')
+    expect(Number(res.headers['retry-after'])).toBeGreaterThan(0)
+    expect(count('SELECT COUNT(*) FROM notes WHERE user_id = ?', alice.id)).toBe(NOTE_LIMITS.creates.limit)
+
+    // another account is not affected, and the window slides
+    await createNote(bob)
+    t.clock.advance(NOTE_LIMITS.creates.windowMs)
+    await createNote(alice)
+  })
+
+  it(`allows ${NOTE_LIMITS.contentSaves.limit} content saves per 15 minutes per account, counted before the body is read`, async () => {
+    const { id } = await createNote(alice)
+    // every attempt counts, even one whose body is rejected
+    for (let i = 0; i < NOTE_LIMITS.contentSaves.limit; i++) {
+      expect((await saveContent(alice, id, {})).statusCode).toBe(400)
+    }
+    const valid = await saveContent(alice, id, { content: doc('x'), version: 1 })
+    expect(valid.statusCode).toBe(429)
+    expect(errorCode(valid)).toBe('RATE_LIMITED')
+    expect(Number(valid.headers['retry-after'])).toBeGreaterThan(0)
+    // a limited request is refused before its body is parsed or validated
+    expect((await saveContent(alice, id, {})).statusCode).toBe(429)
+    expect(await getNote(alice, id)).toMatchObject({ version: 1 })
+
+    // refused attempts do not extend the window; other accounts are not affected
+    const bobNote = await createNote(bob)
+    expect((await saveContent(bob, bobNote.id, { content: doc('y'), version: 1 })).statusCode).toBe(200)
+    t.clock.advance(NOTE_LIMITS.contentSaves.windowMs)
+    expect((await saveContent(alice, id, { content: doc('x'), version: 1 })).statusCode).toBe(200)
   })
 })

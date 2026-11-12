@@ -4,8 +4,8 @@ import { LockIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { ApiError } from '@/lib/api'
-import { unlockSharedNote } from './api'
+import { ApiError, isUnreachable } from '@/lib/api'
+import { GENERIC_UNLOCK_ERROR, unlockSharedNote } from './api'
 
 interface LockScreenProps {
   noteId: string
@@ -13,19 +13,14 @@ interface LockScreenProps {
   onUnlock: (token: string) => void
 }
 
-/** Wrong PIN, missing, private or link-only note: one message, so nothing is revealed. */
-export const GENERIC_UNLOCK_ERROR = 'That PIN did not work, or this note is no longer shared.'
-
 /** The message for a failed unlock. Only a lockout (429) and an unreachable server differ from the generic one. */
 function unlockErrorMessage(err: unknown): string {
-  if (err instanceof ApiError) {
-    if (err.status === 429) {
-      if (err.retryAfter === undefined) return 'Too many attempts. Try again later.'
-      const minutes = Math.max(1, Math.ceil(err.retryAfter / 60))
-      return `Too many attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`
-    }
-    if (err.status === 0 || err.status >= 500) return 'Could not unlock right now. Try again in a moment.'
+  if (err instanceof ApiError && err.status === 429) {
+    if (err.retryAfter === undefined) return 'Too many attempts. Try again later.'
+    const minutes = Math.max(1, Math.ceil(err.retryAfter / 60))
+    return `Too many attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`
   }
+  if (isUnreachable(err)) return 'Could not unlock right now. Try again in a moment.'
   return GENERIC_UNLOCK_ERROR
 }
 

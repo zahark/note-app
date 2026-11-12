@@ -133,12 +133,12 @@ describe('AttachmentImage node view', () => {
     expect(img.getAttribute('src')).toBe('blob:new')
   })
 
-  it('renders a non-attachment src unchanged without calling the resolver', () => {
+  it('never loads a non-attachment src stored in content (no request to an outside URL)', () => {
     const resolver = vi.fn(ownerResolver)
     const editor = makeEditor(doc(image('https://example.com/a.png')), resolver)
 
     const img = editor.view.dom.querySelector('img')!
-    expect(img.getAttribute('src')).toBe('https://example.com/a.png')
+    expect(img.hasAttribute('src')).toBe(false)
     expect(img.hasAttribute('data-attachment-id')).toBe(false)
     expect(resolver).not.toHaveBeenCalled()
   })
@@ -209,9 +209,25 @@ describe('AttachmentImage HTML (clipboard)', () => {
     expect(imageSrcs(editor.getJSON())).toEqual([attachmentSrc(AID)])
   })
 
-  it('pasted HTML with an ordinary image keeps its src', () => {
+  it('pasted HTML with an outside or data: image drops the image and keeps the text', () => {
     const editor = makeEditor(doc(paragraph('x')))
-    pasteAtEnd(editor, new Map([['text/html', '<img src="https://example.com/b.png">']]))
-    expect(imageSrcs(editor.getJSON())).toEqual(['https://example.com/b.png'])
+    pasteAtEnd(
+      editor,
+      new Map([
+        [
+          'text/html',
+          '<p>kept</p><img src="https://example.com/b.png"><img src="data:image/png;base64,iVBORw0KGgo=">' +
+            '<img src="https://example.com/c.png" data-attachment-id="not-a-uuid">',
+        ],
+      ]),
+    )
+    expect(imageSrcs(editor.getJSON())).toEqual([])
+    expect(editor.getText()).toContain('kept')
+  })
+
+  it('pasted HTML with an attachment:// src (no data-attachment-id) is read as the reference', () => {
+    const editor = makeEditor(doc(paragraph('x')))
+    pasteAtEnd(editor, new Map([['text/html', `<img src="${attachmentSrc(OTHER_AID)}">`]]))
+    expect(imageSrcs(editor.getJSON())).toEqual([attachmentSrc(OTHER_AID)])
   })
 })

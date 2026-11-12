@@ -5,12 +5,13 @@
 import { createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto'
 import type { Config } from '../config.js'
 import type { Db } from '../db/index.js'
-import { AppError, badRequest, notFound, tooManyRequests } from '../errors.js'
+import { AppError, badRequest, notFound } from '../errors.js'
 import { getNoteSummary, updateNoteShare } from '../repos/notes.js'
 import { getNoteShareState, type NoteShareState } from '../repos/publicShare.js'
+import { DAY_SEC, HOUR_SEC, MINUTE_MS } from '../units.js'
 import { ipKey } from './ipKey.js'
 import type { PasswordService } from './password.js'
-import { RateLimiter, type Clock } from './ratelimit.js'
+import { RateLimiter, type Clock } from './rateLimiter.js'
 
 export const PIN_LENGTH = 8
 /** Upper-case letters and digits without the look-alikes 0/O and 1/I: 32 symbols, 40 bits per PIN. */
@@ -19,25 +20,26 @@ export const PIN_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 /** Lifetime of the token a correct PIN unlocks. */
 export const SHARE_TOKEN_TTL_SEC = 30 * 60
 /** Longest a signed link may live. */
-export const MAX_SIGNED_TTL_SEC = 30 * 24 * 60 * 60
+export const MAX_SIGNED_TTL_SEC = 30 * DAY_SEC
 
 /** The expiry choices offered for signed links. */
 export const SIGNED_TTL_OPTIONS = {
-  '1h': 60 * 60,
-  '1d': 24 * 60 * 60,
-  '7d': 7 * 24 * 60 * 60,
+  '1h': HOUR_SEC,
+  '1d': DAY_SEC,
+  '7d': 7 * DAY_SEC,
   '30d': MAX_SIGNED_TTL_SEC,
 } as const
 export type SignedTtlOption = keyof typeof SIGNED_TTL_OPTIONS
 
-const MINUTE = 60_000
 /** PIN unlock limits; both are checked before any database lookup or argon2 work. */
 export const UNLOCK_LIMITS = {
   /** Failures per requested note id, whether or not the note exists or is PIN-shared. */
-  failuresPerNote: { limit: 5, windowMs: 15 * MINUTE },
+  failuresPerNote: { limit: 5, windowMs: 15 * MINUTE_MS },
   /** Attempts per client IP key (same normalization as login). */
-  attemptsPerIp: { limit: 30, windowMs: 15 * MINUTE },
+  attemptsPerIp: { limit: 30, windowMs: 15 * MINUTE_MS },
 } as const
+
+const TOO_MANY_ATTEMPTS = 'Too many attempts, try again later'
 
 /** The single failure response of the public share surface: wrong PIN, expired, revoked, missing. */
 export const unavailable = () => new AppError(404, 'UNAVAILABLE', 'This shared note is unavailable')
@@ -119,13 +121,11 @@ export interface ShareServiceOptions {
 }
 
 export class ShareService {
-  readonly limits: { [K in keyof typeof UNLOCK_LIMITS]: RateLimiter }
+  private readonly limits: { [K in keyof typeof UNLOCK_LIMITS]: RateLimiter }
   private readonly db: Db
   private readonly config: Config
   private readonly passwords: PasswordService
   private readonly now: Clock
-  /** Unlock attempts per note id that are past the limiter and still verifying. */
-  private readonly inFlight = new Map<string, number>()
 
   constructor({ db, config, passwords, now = Date.now }: ShareServiceOptions) {
     this.db = db
@@ -190,15 +190,11 @@ export class ShareService {
     const perNote = this.limits.failuresPerNote
     const perIp = this.limits.attemptsPerIp
     const ipk = ipKey(ip)
-    // Attempts still verifying count as failures-to-be, so a burst of parallel guesses cannot exceed the
-    // limit. The check and the reservation below run before the first await.
-    const pending = this.inFlight.get(noteId) ?? 0
-    if (perNote.count(noteId) + pending >= perNote.limit) {
-      throw tooManyRequests('Too many attempts, try again later', perNote.retryAfterMs(noteId))
-    }
-    if (perIp.isLimited(ipk)) throw tooManyRequests('Too many attempts, try again later', perIp.retryAfterMs(ipk))
-    perIp.hit(ipk)
-    this.inFlight.set(noteId, pending + 1)
+    // Attempts still verifying are reserved as failures-to-be, so a burst of parallel guesses cannot
+    // exceed the limit. The checks and the reservation below run before the first await.
+    perNote.check(noteId, TOO_MANY_ATTEMPTS)
+    perIp.enforce(ipk, TOO_MANY_ATTEMPTS)
+    perNote.reserve(noteId)
 
     let ok = false
     let verified = false
@@ -209,9 +205,7 @@ export class ShareService {
       ok = await this.passwords.verify(hash, normalizePin(pin))
       verified = true
     } finally {
-      const left = (this.inFlight.get(noteId) ?? 1) - 1
-      if (left > 0) this.inFlight.set(noteId, left)
-      else this.inFlight.delete(noteId)
+      perNote.release(noteId)
       // only a completed wrong verification counts (a 503 from the hash limiter is not a guess)
       if (verified && !ok) perNote.hit(noteId)
     }

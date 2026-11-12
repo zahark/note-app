@@ -5,12 +5,17 @@ import { requireUserId } from './scope.js'
 
 export type Access = 'owner' | 'none'
 
-/** `owner` when `userId` owns `noteId`; `none` for another user's note or a missing one. */
-export function resolveAccess(db: Db, userId: string, noteId: string): Access {
+/** True when `userId` owns `noteId`; false for another user's note or a missing one. */
+export function ownsNote(db: Db, userId: string, noteId: string): boolean {
   requireUserId(userId)
   const owned = db
     .prepare('SELECT EXISTS (SELECT 1 FROM notes WHERE id = ? AND user_id = ?)')
     .pluck()
     .get(noteId, userId)
-  return owned === 1 ? 'owner' : 'none'
+  return owned === 1
+}
+
+/** `owner` when `userId` owns `noteId`; `none` for another user's note or a missing one. */
+export function resolveAccess(db: Db, userId: string, noteId: string): Access {
+  return ownsNote(db, userId, noteId) ? 'owner' : 'none'
 }

@@ -3,6 +3,7 @@
 // sweep, which lives in the unscoped `publicShare.ts`.
 import { randomUUID } from 'node:crypto'
 import type { Db } from '../db/index.js'
+import { ownsNote } from './access.js'
 import { requireUserId } from './scope.js'
 
 export interface AttachmentRow {
@@ -44,6 +45,15 @@ export function getAttachment(db: Db, userId: string, attachmentId: string): Att
     .get(attachmentId, userId) as AttachmentRow | undefined
 }
 
+/** Total size in bytes of every attachment the user has stored (referenced or awaiting the sweep). */
+export function attachmentBytesUsed(db: Db, userId: string): number {
+  requireUserId(userId)
+  return db
+    .prepare('SELECT COALESCE(SUM(size), 0) FROM attachments WHERE user_id = ?')
+    .pluck()
+    .get(userId) as number
+}
+
 /**
  * Makes the note's `note_attachments` rows equal to `attachmentIds`, keeping only ids of attachments
  * owned by `userId` (another user's or unknown ids are ignored, so nobody can link someone else's image
@@ -58,11 +68,7 @@ export function setNoteAttachments(
   attachmentIds: readonly string[],
 ): boolean {
   requireUserId(userId)
-  const owned = db
-    .prepare('SELECT EXISTS (SELECT 1 FROM notes WHERE id = ? AND user_id = ?)')
-    .pluck()
-    .get(noteId, userId)
-  if (owned !== 1) return false
+  if (!ownsNote(db, userId, noteId)) return false
   const params = { note: noteId, userId, ids: JSON.stringify(attachmentIds) }
   db.prepare(
     `DELETE FROM note_attachments
@@ -75,18 +81,4 @@ export function setNoteAttachments(
       WHERE a.user_id = @userId AND a.id IN (SELECT value FROM json_each(@ids))`,
   ).run(params)
   return true
-}
-
-/** Ids of the attachments linked to the caller's note (empty for another user's or a missing note). */
-export function listNoteAttachmentIds(db: Db, userId: string, noteId: string): string[] {
-  requireUserId(userId)
-  return db
-    .prepare(
-      `SELECT na.attachment_id FROM note_attachments na
-         JOIN notes n ON n.id = na.note_id
-        WHERE na.note_id = ? AND n.user_id = ?
-        ORDER BY na.attachment_id`,
-    )
-    .pluck()
-    .all(noteId, userId) as string[]
 }

@@ -3,6 +3,7 @@
 // `share_secret` is never selected here.
 import { randomUUID } from 'node:crypto'
 import type { Db } from '../db/index.js'
+import { ownsNote } from './access.js'
 import { requireUserId } from './scope.js'
 
 export type ShareType = 'private' | 'password_protected' | 'signed_url'
@@ -94,6 +95,8 @@ export function renameNote(db: Db, userId: string, noteId: string, title: string
 /**
  * Optimistic-concurrency content save: writes only when the stored `version` equals
  * `expectedVersion`, then increments it. `not_found` covers another user's note too.
+ * Run it inside the caller's transaction (`saveContentWithAttachments` syncs the note's attachment
+ * references in the same IMMEDIATE transaction).
  */
 export function saveNoteContent(
   db: Db,
@@ -103,24 +106,16 @@ export function saveNoteContent(
   expectedVersion: number,
 ): SaveContentResult {
   requireUserId(userId)
-  const json = JSON.stringify(content)
-  const save = db.transaction((): SaveContentResult => {
-    const updated = db
-      .prepare(
-        `UPDATE notes SET content = ?, version = version + 1, updated_at = unixepoch()
-          WHERE id = ? AND user_id = ? AND version = ?
-          RETURNING version`,
-      )
-      .pluck()
-      .get(json, noteId, userId, expectedVersion) as number | undefined
-    if (updated !== undefined) return { ok: true, version: updated }
-    const exists = db
-      .prepare('SELECT EXISTS (SELECT 1 FROM notes WHERE id = ? AND user_id = ?)')
-      .pluck()
-      .get(noteId, userId)
-    return { ok: false, reason: exists === 1 ? 'conflict' : 'not_found' }
-  })
-  return save.immediate()
+  const updated = db
+    .prepare(
+      `UPDATE notes SET content = ?, version = version + 1, updated_at = unixepoch()
+        WHERE id = ? AND user_id = ? AND version = ?
+        RETURNING version`,
+    )
+    .pluck()
+    .get(JSON.stringify(content), noteId, userId, expectedVersion) as number | undefined
+  if (updated !== undefined) return { ok: true, version: updated }
+  return { ok: false, reason: ownsNote(db, userId, noteId) ? 'conflict' : 'not_found' }
 }
 
 /** Deletes the note (its attachment references cascade). Returns false when not the caller's. */

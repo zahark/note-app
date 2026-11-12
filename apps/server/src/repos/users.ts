@@ -25,15 +25,37 @@ export class EmailTakenError extends Error {
   }
 }
 
+/** Thrown by `createUser` with `onlyIfFirst` when an account already exists. */
+export class NotFirstUserError extends Error {
+  constructor() {
+    super('An account already exists')
+    this.name = 'NotFirstUserError'
+  }
+}
+
+/** True when at least one account exists. */
+export function hasUsers(db: Db): boolean {
+  return db.prepare('SELECT EXISTS (SELECT 1 FROM users)').pluck().get() === 1
+}
+
 /**
  * Inserts a user. The first account ever created becomes the owner (`is_owner = 1`): the emptiness check
  * and the insert run in one IMMEDIATE transaction, and the partial unique index allows only one owner,
- * so two simultaneous first signups can never both become owner. Throws EmailTakenError on a duplicate.
+ * so two simultaneous first signups can never both become owner. With `onlyIfFirst`, the insert is
+ * refused (NotFirstUserError) unless the table is empty, decided by that same check, so at most one of
+ * several simultaneous first signups succeeds. Throws EmailTakenError on a duplicate.
  */
-export function createUser(db: Db, email: string, passwordHash: string): UserRow {
+export function createUser(
+  db: Db,
+  email: string,
+  passwordHash: string,
+  { onlyIfFirst = false }: { onlyIfFirst?: boolean } = {},
+): UserRow {
   const id = randomUUID()
   const insert = db.transaction(() => {
-    const isOwner = db.prepare('SELECT EXISTS (SELECT 1 FROM users)').pluck().get() === 0 ? 1 : 0
+    const first = !hasUsers(db)
+    if (onlyIfFirst && !first) throw new NotFirstUserError()
+    const isOwner = first ? 1 : 0
     db.prepare('INSERT INTO users (id, email, password_hash, is_owner) VALUES (?, ?, ?, ?)').run(
       id,
       email,

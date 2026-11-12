@@ -306,7 +306,11 @@ describe('the unavailable response', () => {
     responses['private note'] = await getShared(priv)
     responses['nonexistent note'] = await getShared(randomUUID())
     responses['nonexistent note, attachment'] = await getSharedImage(randomUUID(), randomUUID())
-    responses['malformed id'] = await getShared('x'.repeat(100))
+    responses['non-UUID id'] = await getShared('x'.repeat(100))
+    // over the router's 100-char param limit: still the identical response, not Fastify's own 414
+    responses['101-char id'] = await getShared('x'.repeat(101))
+    responses['150-char id'] = await getShared('x'.repeat(150))
+    responses['150-char id, attachment'] = await getSharedImage('x'.repeat(150), aid)
 
     const reference = responses['nonexistent note']!
     expect(reference.statusCode).toBe(404)
@@ -345,6 +349,7 @@ describe('the unavailable response', () => {
       await unlockReq(noteId, ''),
       await publicGet('/api/shared/a/b/c/d'),
       await publicGet('/api/shared'),
+      await getShared('x'.repeat(150)),
     ]
     for (let i = 0; i < 5; i++) await unlockReq(noteId, 'ZZZZZZZZ', { ip: `198.51.100.${i}` })
     const locked = await unlockReq(noteId, pin)
@@ -388,6 +393,17 @@ describe('payload', () => {
 })
 
 describe('shared attachments', () => {
+  it("a hand-inserted link from a shared note to another user's attachment is unavailable", async () => {
+    // the API never creates such a row (foreign ids in content are ignored); the join on the owner is
+    // the last line of defence if one ever exists
+    const bobsAid = await uploadPng(t.app, bob)
+    t.db.prepare('INSERT INTO note_attachments (note_id, attachment_id) VALUES (?, ?)').run(noteId, bobsAid)
+    const token = await unlock()
+    expectUnavailable(await getSharedImage(noteId, bobsAid, { token }))
+    // the same request for alice's own linked image works
+    expect((await getSharedImage(noteId, aid, { token })).statusCode).toBe(200)
+  })
+
   it("a valid token or link for note A cannot fetch an attachment linked only to note B", async () => {
     const onlyB = await uploadPng(t.app, alice)
     await newNote('B', docWithImages(onlyB))

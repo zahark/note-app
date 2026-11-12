@@ -1,3 +1,5 @@
+import { tooManyRequests } from '../errors.js'
+
 /** Clock in milliseconds; injectable so tests can move time. */
 export type Clock = () => number
 
@@ -13,14 +15,19 @@ const SWEEP_EVERY = 1000
 
 /**
  * Generic in-memory sliding-window counter (single process; a restart clears it).
- * Callers check `isLimited(key)` **before** doing any expensive work, and `hit(key)` to record
- * whatever event is being limited (a failure, a success, an attempt).
+ * Callers check `isLimited(key)` (or `check`/`enforce`, which throw the 429) **before** doing any
+ * expensive work, and `hit(key)` to record whatever event is being limited (a failure, a success, an
+ * attempt). An outcome that is only known after an await (a failed password check) is `reserve`d before
+ * the await and `release`d after it, so a parallel burst cannot pass the check before any of its hits
+ * has been recorded.
  */
 export class RateLimiter {
   readonly limit: number
   readonly windowMs: number
   private readonly now: Clock
   private readonly hits = new Map<string, number[]>()
+  /** Reservations per key: attempts in flight whose outcome may still become a hit. */
+  private readonly reserved = new Map<string, number>()
   private hitsSinceSweep = 0
 
   constructor({ limit, windowMs, now = Date.now }: RateLimiterOptions) {
@@ -46,9 +53,35 @@ export class RateLimiter {
     return this.live(key, this.now()).length
   }
 
-  /** True when `key` already has `limit` hits inside the window, so the next action must be refused. */
+  /**
+   * True when `key`'s hits inside the window plus its outstanding reservations reach `limit`, so the next
+   * action must be refused.
+   */
   isLimited(key: string): boolean {
-    return this.count(key) >= this.limit
+    return this.count(key) + (this.reserved.get(key) ?? 0) >= this.limit
+  }
+
+  /** Throws 429 `message` (with Retry-After) when `key` is limited. */
+  check(key: string, message: string): void {
+    if (this.isLimited(key)) throw tooManyRequests(message, this.retryAfterMs(key))
+  }
+
+  /** `check`, then records the attempt as a hit. */
+  enforce(key: string, message: string): void {
+    this.check(key, message)
+    this.hit(key)
+  }
+
+  /** Counts one in-flight attempt of `key` as a hit-to-be until `release`. */
+  reserve(key: string): void {
+    this.reserved.set(key, (this.reserved.get(key) ?? 0) + 1)
+  }
+
+  /** Drops one reservation of `key` (call it in a `finally`, then `hit` if the outcome counts). */
+  release(key: string): void {
+    const left = (this.reserved.get(key) ?? 0) - 1
+    if (left > 0) this.reserved.set(key, left)
+    else this.reserved.delete(key)
   }
 
   /** Milliseconds until `key` is no longer limited (0 when it is not limited). */
@@ -70,11 +103,6 @@ export class RateLimiter {
     if (list.length > this.limit) list.splice(0, list.length - this.limit)
     this.hits.set(key, list)
     if (++this.hitsSinceSweep >= SWEEP_EVERY) this.sweep(now)
-  }
-
-  /** Forgets every hit for `key`. */
-  reset(key: string): void {
-    this.hits.delete(key)
   }
 
   /** Drops keys whose hits have all left the window, bounding memory. */

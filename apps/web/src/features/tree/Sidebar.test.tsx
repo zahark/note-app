@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockFetch, renderWithProviders, type MockResponse } from '@/test/utils'
-import type { TreeData, TreeFolder, TreeNote } from './buildTree'
+import type { TreeData, TreeFolder, TreeNote } from './api'
 import { Sidebar } from './Sidebar'
 import { EXPANDED_STORAGE_KEY } from './useExpanded'
 

@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react'
 import { Navigate, useLocation } from 'react-router'
 import { Button } from '@/components/ui/button'
+import { errorMessage } from '@/lib/api'
 import { useMe } from './api'
-import { errorMessage } from './validation'
 
 /** Renders `children` only with a valid session; otherwise redirects to `/login` (remembering the page). */
 export function RequireAuth({ children }: { children: ReactNode }) {

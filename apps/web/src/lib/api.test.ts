@@ -1,5 +1,5 @@
 import { mockFetch } from '@/test/utils'
-import { api, apiFetch, ApiError, isUnauthorized } from './api'
+import { api, apiFetch, ApiError, isNotFound, isUnauthorized, isUnreachable } from './api'
 
 describe('apiFetch', () => {
   it('sends same-origin credentials and parses the JSON body', async () => {
@@ -68,5 +68,16 @@ describe('apiFetch', () => {
     expect(isUnauthorized(new ApiError(401, 'UNAUTHORIZED', 'Authentication required'))).toBe(true)
     expect(isUnauthorized(new ApiError(404, 'NOT_FOUND', 'Not found'))).toBe(false)
     expect(isUnauthorized(new Error('x'))).toBe(false)
+  })
+
+  it('identifies an unreachable server (network error or 5xx) and a missing resource', () => {
+    expect(isUnreachable(new ApiError(0, 'NETWORK_ERROR', 'Network error'))).toBe(true)
+    expect(isUnreachable(new ApiError(503, 'BUSY', 'Server busy'))).toBe(true)
+    expect(isUnreachable(new ApiError(429, 'RATE_LIMITED', 'Too many'))).toBe(false)
+    expect(isUnreachable(new ApiError(404, 'NOT_FOUND', 'Not found'))).toBe(false)
+    expect(isUnreachable(new Error('x'))).toBe(false)
+    expect(isNotFound(new ApiError(404, 'NOT_FOUND', 'Not found'))).toBe(true)
+    expect(isNotFound(new ApiError(400, 'BAD_REQUEST', 'Bad request'))).toBe(false)
+    expect(isNotFound(new Error('x'))).toBe(false)
   })
 })

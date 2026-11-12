@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
-import type { TreeNote } from '@/features/tree/buildTree'
+import type { TreeNote } from '@/features/tree/api'
 import { mockFetch, renderWithProviders, type MockResponse } from '@/test/utils'
 import { shareStatusText } from './api'
 import { ShareButton } from './ShareDialog'
@@ -24,7 +24,7 @@ const note = (overrides: Partial<TreeNote> = {}): TreeNote => ({
 })
 const tree = (n: TreeNote): MockResponse => ({ body: { folders: [], notes: [n] } })
 
-async function openDialog(initial: TreeNote = note(), routes: Record<string, MockResponse> = {}) {
+async function openDialog(initial: TreeNote = note(), routes: Parameters<typeof mockFetch>[0] = {}) {
   const user = userEvent.setup()
   const mock = mockFetch({ 'GET /api/tree': tree(initial), ...routes })
   renderWithProviders(createElement(ShareButton, { note: initial }))
@@ -96,9 +96,57 @@ describe('ShareDialog', () => {
     expect(within(dialog).queryByTestId('created-share')).not.toBeInTheDocument()
     expect(within(dialog).getByTestId('share-status')).toHaveTextContent('Not shared.')
   })
+
+  it('"New PIN" sends another request and replaces the PIN shown', async () => {
+    const pins = ['ABCD2345', 'WXYZ6789']
+    let calls = 0
+    const { user, dialog, requests } = await openDialog(note(), {
+      [`POST ${SHARE_PATH}`]: () => ({ body: { share: { type: 'password_protected', pin: pins[calls++] } } }),
+    })
+    await user.click(within(dialog).getByRole('button', { name: 'Create PIN' }))
+    expect(await within(dialog).findByLabelText('Shared pin')).toHaveValue('ABCD2345')
+
+    await user.click(within(dialog).getByRole('button', { name: 'New PIN' }))
+    await waitFor(() => expect(within(dialog).getByLabelText('Shared pin')).toHaveValue('WXYZ6789'))
+    expect(requests.filter((r) => r.method === 'POST').map((r) => r.body)).toEqual([
+      { type: 'password_protected' },
+      { type: 'password_protected' },
+    ])
+  })
+
+  it('"New link" sends another request and replaces the link shown', async () => {
+    const shared = note({ share_type: 'signed_url', expires_at: 1999999999 })
+    const NEW_URL = `http://localhost:3000/shared/${NOTE_ID}?exp=1999999999&sig=new`
+    const { user, dialog, requests } = await openDialog(shared, {
+      [`POST ${SHARE_PATH}`]: { body: { share: { type: 'signed_url', exp: 1999999999, sig: 'new', url: NEW_URL } } },
+    })
+    await user.click(within(dialog).getByRole('button', { name: 'New link' }))
+    expect(await within(dialog).findByLabelText('Shared link')).toHaveValue(NEW_URL)
+    expect(requests.filter((r) => r.method === 'POST')).toHaveLength(1)
+    expect(within(dialog).getByTestId('share-status')).toHaveTextContent(/^Shared by a link until /)
+  })
+
+  it('shows an error toast and stays shared when stopping fails', async () => {
+    const shared = note({ share_type: 'password_protected' })
+    const { user, dialog } = await openDialog(shared, {
+      [`DELETE ${SHARE_PATH}`]: { status: 500, body: { error: { code: 'INTERNAL', message: 'Server error' } } },
+    })
+    await user.click(within(dialog).getByRole('button', { name: 'Stop sharing' }))
+
+    expect(await screen.findByText('Could not stop sharing: Server error')).toBeInTheDocument()
+    expect(within(dialog).getByTestId('share-status')).toHaveTextContent('Shared with a PIN.')
+    expect(within(dialog).getByRole('button', { name: 'Stop sharing' })).toBeEnabled()
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }))
+    expect(await screen.findByRole('button', { name: 'Shared' })).toBeInTheDocument()
+  })
 })
 
 describe('shareStatusText', () => {
+  it('titles a note whose title is whitespace only "Untitled", as the sidebar does', async () => {
+    const { dialog } = await openDialog(note({ title: '   ' }))
+    expect(within(dialog).getByRole('heading', { name: 'Share “Untitled”' })).toBeInTheDocument()
+  })
+
   it('describes each share state', () => {
     expect(shareStatusText(note())).toBe('Not shared.')
     expect(shareStatusText(note({ share_type: 'password_protected' }))).toBe('Shared with a PIN.')

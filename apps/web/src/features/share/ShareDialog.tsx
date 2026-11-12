@@ -12,8 +12,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { errorMessage, useTree } from '@/features/tree/api'
-import type { TreeNote } from '@/features/tree/buildTree'
+import { useTree, type TreeNote } from '@/features/tree/api'
+import { displayTitle } from '@/features/tree/buildTree'
+import { errorMessage } from '@/lib/api'
 import {
   createShare,
   EXPIRY_OPTIONS,
@@ -109,7 +110,7 @@ function SharePanel({ note, onDone }: { note: TreeNote; onDone: () => void }) {
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Share “{note.title || 'Untitled'}”</DialogTitle>
+        <DialogTitle>Share “{displayTitle(note.title)}”</DialogTitle>
         <DialogDescription data-testid="share-status">{shareStatusText(note)}</DialogDescription>
       </DialogHeader>
 

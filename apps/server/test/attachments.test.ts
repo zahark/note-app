@@ -3,8 +3,14 @@
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { detectImageMime, extractAttachmentIds, MAX_ATTACHMENT_BYTES, uploadsDir } from '../src/services/attachments.js'
-import { closeApp, errorCode, makeApp, type TestApp } from './helpers/auth.js'
+import {
+  detectImageMime,
+  extractAttachmentIds,
+  MAX_ATTACHMENT_BYTES,
+  UPLOAD_LIMIT,
+  uploadsDir,
+} from '../src/services/attachments.js'
+import { closeApp, errorCode, makeApp, ORIGIN, type TestApp } from './helpers/auth.js'
 import { api, loginAs, PNG, tmpDataDir, upload, uploadPng, type TestUser } from './helpers/api.js'
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -115,6 +121,17 @@ describe('POST /api/attachments', () => {
     expect(res.statusCode).toBe(201)
   })
 
+  it.each([
+    ['PNG bytes named .jpg and declared as JPEG', { data: PNG, contentType: 'image/jpeg', filename: 'x.jpg' }, 'image/png'],
+    ['WebP bytes declared as octet-stream', { data: WEBP, contentType: 'application/octet-stream' }, 'image/webp'],
+  ])('accepts %s on its magic bytes and stores the detected type', async (_name, file, detected) => {
+    const res = await upload(t.app, alice, file)
+    expect(res.statusCode).toBe(201)
+    const { id } = res.json() as { id: string }
+    expect(t.db.prepare('SELECT mime FROM attachments WHERE id = ?').pluck().get(id)).toBe(detected)
+    expect((await api(t.app, alice, 'GET', `/api/attachments/${id}`)).headers['content-type']).toBe(detected)
+  })
+
   it('rejects a file over 10 MB with 413 and stores nothing', async () => {
     const data = Buffer.concat([PNG, Buffer.alloc(MAX_ATTACHMENT_BYTES)])
     const res = await upload(t.app, alice, { data })
@@ -134,14 +151,60 @@ describe('POST /api/attachments', () => {
     ['SVG declared as SVG', { data: SVG, contentType: 'image/svg+xml', filename: 'x.svg' }],
     ['SVG declared as PNG', { data: SVG, contentType: 'image/png' }],
     ['text with a PNG mime (wrong magic bytes)', { data: Buffer.from('not an image'), contentType: 'image/png' }],
-    ['PNG bytes declared as JPEG (wrong mime)', { data: PNG, contentType: 'image/jpeg' }],
-    ['PNG bytes declared as octet-stream', { data: PNG, contentType: 'application/octet-stream' }],
   ])('rejects %s with 415 and stores nothing', async (_name, file) => {
     const res = await upload(t.app, alice, file)
     expect(res.statusCode).toBe(415)
     expect(errorCode(res)).toBe('UNSUPPORTED_MEDIA_TYPE')
     expect(attachmentRows()).toBe(0)
     expect(uploadedFiles()).toEqual([])
+  })
+
+  /** A raw multipart upload with the given parts (each `{name, filename?, data}`). */
+  function multipart(parts: Array<{ name: string; filename?: string; data: Buffer | string }>) {
+    const boundary = '----edge-case-boundary'
+    const chunks: Buffer[] = []
+    for (const p of parts) {
+      const disposition = `form-data; name="${p.name}"${p.filename ? `; filename="${p.filename}"` : ''}`
+      const type = p.filename ? 'Content-Type: image/png\r\n' : ''
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: ${disposition}\r\n${type}\r\n`))
+      chunks.push(Buffer.isBuffer(p.data) ? p.data : Buffer.from(p.data))
+      chunks.push(Buffer.from('\r\n'))
+    }
+    chunks.push(Buffer.from(`--${boundary}--\r\n`))
+    return t.app.inject({
+      method: 'POST',
+      url: '/api/attachments',
+      headers: { origin: ORIGIN, 'content-type': `multipart/form-data; boundary=${boundary}` },
+      cookies: { sid: alice.sid },
+      payload: Buffer.concat(chunks),
+    })
+  }
+
+  it('a multipart body without any part → 400 "No file uploaded", nothing stored', async () => {
+    const res = await multipart([])
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: { code: 'BAD_REQUEST', message: 'No file uploaded' } })
+    expect(attachmentRows()).toBe(0)
+    expect(uploadedFiles()).toEqual([])
+  })
+
+  it('a text field part (the parts limit allows no fields) is refused with 413, nothing stored', async () => {
+    const res = await multipart([{ name: 'note', data: 'hello' }])
+    expect(res.statusCode).toBe(413)
+    expect(res.json()).toEqual({ error: { code: 'PAYLOAD_TOO_LARGE', message: expect.any(String) } })
+    expect(attachmentRows()).toBe(0)
+    expect(uploadedFiles()).toEqual([])
+  })
+
+  it('with two file parts only the first is stored (one file per upload)', async () => {
+    const res = await multipart([
+      { name: 'file', filename: 'a.png', data: PNG },
+      { name: 'file', filename: 'b.png', data: PNG },
+    ])
+    expect(res.statusCode).toBe(201)
+    expect(attachmentRows()).toBe(1)
+    expect(uploadedFiles()).toHaveLength(1)
+    expect(t.db.prepare('SELECT original_name FROM attachments').pluck().get()).toBe('a.png')
   })
 
   it('rejects a non-multipart body with 415', async () => {
@@ -164,6 +227,88 @@ describe('POST /api/attachments', () => {
   })
 })
 
+describe('POST /api/attachments: per-account rate limit', () => {
+  it(`allows ${UPLOAD_LIMIT.limit} uploads per 15 minutes per account, then 429 with Retry-After`, async () => {
+    for (let i = 0; i < UPLOAD_LIMIT.limit; i++) await uploadPng(t.app, alice)
+    const res = await upload(t.app, alice)
+    expect(res.statusCode).toBe(429)
+    expect(errorCode(res)).toBe('RATE_LIMITED')
+    expect(res.json().error.message).toMatch(/Too many image uploads/)
+    expect(Number(res.headers['retry-after'])).toBeGreaterThan(0)
+    expect(attachmentRows()).toBe(UPLOAD_LIMIT.limit)
+
+    // another account is not affected
+    expect((await upload(t.app, bob)).statusCode).toBe(201)
+    // and the window slides
+    t.clock.advance(UPLOAD_LIMIT.windowMs)
+    expect((await upload(t.app, alice)).statusCode).toBe(201)
+  })
+})
+
+describe('POST /api/attachments: per-account storage quota', () => {
+  const KIB = 1024
+  /** PNG magic bytes padded to `kib` KiB: enough for the type check. */
+  const pngOf = (kib: number) => Buffer.concat([PNG, Buffer.alloc(kib * KIB - PNG.length)])
+
+  let q: TestApp
+  let carol: TestUser
+  let dave: TestUser
+  let quotaDir: string
+
+  beforeEach(async () => {
+    quotaDir = tmpDataDir()
+    q = await makeApp({ env: { DATA_DIR: quotaDir, UPLOAD_QUOTA_MB: '1' } })
+    carol = await loginAs(q, 'carol@example.com')
+    dave = await loginAs(q, 'dave@example.com')
+  })
+
+  afterEach(async () => {
+    await closeApp(q)
+    rmSync(quotaDir, { recursive: true, force: true })
+  })
+
+  const files = () => (existsSync(uploadsDir(quotaDir)) ? readdirSync(uploadsDir(quotaDir)) : [])
+
+  it('refuses an upload that would exceed UPLOAD_QUOTA_MB with 413 QUOTA_EXCEEDED and stores nothing', async () => {
+    expect((await upload(q.app, carol, { data: pngOf(600) })).statusCode).toBe(201)
+    const res = await upload(q.app, carol, { data: pngOf(600) })
+    expect(res.statusCode).toBe(413)
+    expect(errorCode(res)).toBe('QUOTA_EXCEEDED')
+    expect(res.json().error.message).toMatch(/Image storage is full \(1 MB per account\)/)
+    expect(files()).toHaveLength(1)
+
+    // what still fits is accepted; the quota is per account
+    expect((await upload(q.app, carol, { data: pngOf(400) })).statusCode).toBe(201)
+    expect((await upload(q.app, dave, { data: pngOf(600) })).statusCode).toBe(201)
+  })
+
+  it('a full account is refused before the body is stored', async () => {
+    expect((await upload(q.app, carol, { data: pngOf(1024) })).statusCode).toBe(201)
+    const res = await upload(q.app, carol)
+    expect(res.statusCode).toBe(413)
+    expect(errorCode(res)).toBe('QUOTA_EXCEEDED')
+    expect(files()).toHaveLength(1)
+  })
+
+  it('parallel uploads cannot together overshoot the quota', async () => {
+    const results = await Promise.all([1, 2, 3, 4].map(() => upload(q.app, carol, { data: pngOf(600) })))
+    expect(results.map((r) => r.statusCode).sort()).toEqual([201, 413, 413, 413])
+    expect(files()).toHaveLength(1)
+  })
+
+  it('UPLOAD_QUOTA_MB=0 means no quota', async () => {
+    const free = await makeApp({ env: { DATA_DIR: quotaDir, UPLOAD_QUOTA_MB: '0' } })
+    try {
+      const erin = await loginAs(free, 'erin@example.com')
+      for (let i = 0; i < 3; i++) {
+        expect((await upload(free.app, erin, { data: pngOf(600) })).statusCode).toBe(201)
+      }
+    } finally {
+      await closeApp(free)
+    }
+  })
+})
+
 describe('GET /api/attachments/:aid', () => {
   it('serves the owner the bytes with the stored mime and nosniff', async () => {
     const aid = await uploadPng(t.app, alice)
@@ -171,6 +316,8 @@ describe('GET /api/attachments/:aid', () => {
     expect(res.statusCode).toBe(200)
     expect(res.headers['content-type']).toBe('image/png')
     expect(res.headers['x-content-type-options']).toBe('nosniff')
+    // ids are never reused, so the bytes may be cached, but only by the owner's browser
+    expect(res.headers['cache-control']).toBe('private, max-age=31536000, immutable')
     expect(res.rawPayload).toEqual(PNG)
   })
 

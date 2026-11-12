@@ -86,7 +86,7 @@ describe('loadConfig: PUBLIC_ORIGIN', () => {
 describe('loadConfig: defaults', () => {
   it('defaults ALLOW_SIGNUP, HOST, PORT, DATA_DIR and TRUST_PROXY', () => {
     const config = loadConfig(baseEnv())
-    expect(config.allowSignup).toBe(true)
+    expect(config.signupMode).toBe('first-user')
     expect(config.host).toBe('0.0.0.0')
     expect(config.port).toBe(3000)
     expect(config.dataDir).toBe(path.resolve('./data'))
@@ -97,7 +97,7 @@ describe('loadConfig: defaults', () => {
     const config = loadConfig(
       baseEnv({ ALLOW_SIGNUP: '', HOST: '', PORT: '', DATA_DIR: '', TRUST_PROXY: '' }),
     )
-    expect(config.allowSignup).toBe(true)
+    expect(config.signupMode).toBe('first-user')
     expect(config.host).toBe('0.0.0.0')
     expect(config.port).toBe(3000)
     expect(config.trustProxy).toBe(false)
@@ -107,13 +107,22 @@ describe('loadConfig: defaults', () => {
     const config = loadConfig(
       baseEnv({ ALLOW_SIGNUP: 'false', HOST: '127.0.0.1', PORT: '8080', DATA_DIR: '/data' }),
     )
-    expect(config.allowSignup).toBe(false)
+    expect(config.signupMode).toBe('closed')
     expect(config.host).toBe('127.0.0.1')
     expect(config.port).toBe(8080)
     expect(config.dataDir).toBe('/data')
   })
 
-  it.each(['yes', 'TRUE!', 'off'])('rejects ALLOW_SIGNUP=%s', (value) => {
+  it.each([
+    ['true', 'open'],
+    ['1', 'open'],
+    ['false', 'closed'],
+    ['0', 'closed'],
+  ] as const)('ALLOW_SIGNUP=%s → signup %s', (value, mode) => {
+    expect(loadConfig(baseEnv({ ALLOW_SIGNUP: value })).signupMode).toBe(mode)
+  })
+
+  it.each(['yes', 'TRUE!', 'off', 'first-user'])('rejects ALLOW_SIGNUP=%s', (value) => {
     expect(() => loadConfig(baseEnv({ ALLOW_SIGNUP: value }))).toThrow('ALLOW_SIGNUP')
   })
 
@@ -129,6 +138,17 @@ describe('loadConfig: defaults', () => {
 
   it.each(['verbose', 'DEBUG', '1'])('rejects LOG_LEVEL=%s', (value) => {
     expect(() => loadConfig(baseEnv({ LOG_LEVEL: value }))).toThrow('LOG_LEVEL')
+  })
+
+  it('defaults UPLOAD_QUOTA_MB to 1024 and accepts 0 (no limit) and other integers', () => {
+    expect(loadConfig(baseEnv()).uploadQuotaMb).toBe(1024)
+    expect(loadConfig(baseEnv({ UPLOAD_QUOTA_MB: '' })).uploadQuotaMb).toBe(1024)
+    expect(loadConfig(baseEnv({ UPLOAD_QUOTA_MB: '0' })).uploadQuotaMb).toBe(0)
+    expect(loadConfig(baseEnv({ UPLOAD_QUOTA_MB: '5000' })).uploadQuotaMb).toBe(5000)
+  })
+
+  it.each(['-1', '1.5', '1GB', 'unlimited'])('rejects UPLOAD_QUOTA_MB=%s', (value) => {
+    expect(() => loadConfig(baseEnv({ UPLOAD_QUOTA_MB: value }))).toThrow('UPLOAD_QUOTA_MB')
   })
 })
 

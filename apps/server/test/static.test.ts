@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { buildApp, defaultWebDir } from '../src/app.js'
+import { buildApp, CONTENT_SECURITY_POLICY, defaultWebDir } from '../src/app.js'
 import { loadConfig } from '../src/config.js'
 import { openDb, type Db } from '../src/db/index.js'
 
@@ -138,6 +138,28 @@ describe('/shared/* page headers', () => {
       expect(res.headers['referrer-policy']).toBeUndefined()
       expect(res.headers['x-robots-tag']).toBeUndefined()
     }
+  })
+})
+
+describe('Content-Security-Policy', () => {
+  it('every HTML page (index, client routes, the shared page) carries the CSP', async () => {
+    for (const url of ['/', '/index.html', '/login', '/shared/abc', '/shared/abc?exp=1&sig=x']) {
+      const res = await get(url)
+      expectIndexHtml(res)
+      expect(res.headers['content-security-policy']).toBe(CONTENT_SECURITY_POLICY)
+    }
+    // same-origin scripts, styles and images (attachments are shown through blob: URLs) only
+    expect(CONTENT_SECURITY_POLICY).toContain("default-src 'self'")
+    expect(CONTENT_SECURITY_POLICY).toContain("img-src 'self' blob:")
+    expect(CONTENT_SECURITY_POLICY).toContain("object-src 'none'")
+    expect(CONTENT_SECURITY_POLICY).toContain("frame-ancestors 'none'")
+    expect(CONTENT_SECURITY_POLICY).not.toMatch(/script-src[^;]*unsafe/)
+  })
+
+  it('is not added to assets or JSON responses', async () => {
+    expect((await get('/assets/app.js')).headers['content-security-policy']).toBeUndefined()
+    expect((await get('/api/health')).headers['content-security-policy']).toBeUndefined()
+    expect((await get('/api/nope')).headers['content-security-policy']).toBeUndefined()
   })
 })
 

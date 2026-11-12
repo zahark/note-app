@@ -4,6 +4,7 @@ import type { Db } from '../db/index.js'
 import { AppError, conflict, tooManyRequests, unauthorized } from '../errors.js'
 import {
   createKnownDevice,
+  deleteExpiredKnownDevices,
   deleteUserKnownDevices,
   findKnownDevice,
   touchKnownDevice,
@@ -14,6 +15,7 @@ import {
   deleteExpiredSessions,
   deleteSessionByTokenHash,
   deleteUserSessions,
+  extendSession,
   findSession,
   sessionExists,
 } from '../repos/sessions.js'
@@ -22,28 +24,34 @@ import {
   EmailTakenError,
   findUserByEmail,
   findUserById,
+  hasUsers,
+  NotFirstUserError,
   updatePasswordHash,
   type UserRow,
 } from '../repos/users.js'
+import { DAY_SEC, MINUTE_MS } from '../units.js'
 import { HashLimiter } from './hashLimiter.js'
 import { ipKey } from './ipKey.js'
 import { LoginGate } from './loginGate.js'
 import { argon2Hasher, assertValidPassword, PasswordService, type PasswordHasher } from './password.js'
-import { RateLimiter, type Clock } from './ratelimit.js'
+import { RateLimiter, type Clock } from './rateLimiter.js'
 
-export const SESSION_TTL_SEC = 30 * 24 * 60 * 60
-export const DEVICE_TTL_SEC = 365 * 24 * 60 * 60
+export const SESSION_TTL_SEC = 30 * DAY_SEC
+/** A session used with less than this left is extended to a full `SESSION_TTL_SEC` again (sliding). */
+export const SESSION_RENEW_BELOW_SEC = SESSION_TTL_SEC / 2
+export const DEVICE_TTL_SEC = 365 * DAY_SEC
 
-const MINUTE = 60_000
 /** Rate limits (all checked before any argon2 work). */
 export const AUTH_LIMITS = {
-  loginFailuresPerIp: { limit: 30, windowMs: 15 * MINUTE },
-  loginFailuresPerAccountIp: { limit: 10, windowMs: 15 * MINUTE },
-  loginSuccessesPerAccount: { limit: 20, windowMs: 15 * MINUTE },
-  loginSuccessesPerIp: { limit: 20, windowMs: 15 * MINUTE },
-  signupsPerIp: { limit: 5, windowMs: 60 * MINUTE },
-  changePasswordPerUser: { limit: 5, windowMs: 15 * MINUTE },
+  loginFailuresPerIp: { limit: 30, windowMs: 15 * MINUTE_MS },
+  loginFailuresPerAccountIp: { limit: 10, windowMs: 15 * MINUTE_MS },
+  loginSuccessesPerAccount: { limit: 20, windowMs: 15 * MINUTE_MS },
+  loginSuccessesPerIp: { limit: 20, windowMs: 15 * MINUTE_MS },
+  signupsPerIp: { limit: 5, windowMs: 60 * MINUTE_MS },
+  changePasswordPerUser: { limit: 5, windowMs: 15 * MINUTE_MS },
 } as const
+
+const TOO_MANY_ATTEMPTS = 'Too many attempts, try again later'
 
 /** The authenticated user as exposed to routes and the API. */
 export interface AuthUser {
@@ -56,8 +64,17 @@ export interface AuthResult {
   user: AuthUser
   /** Raw session token for the session cookie. */
   sessionToken: string
-  /** Raw device token for the device cookie (the presented one when it was reused). */
-  deviceToken: string
+  /**
+   * Raw device token for the device cookie (the presented one when it was reused). Undefined when the
+   * browser holds a still-valid device cookie of another account: that cookie is kept, not replaced.
+   */
+  deviceToken: string | undefined
+}
+
+/** An authenticated session: its user, and whether this lookup extended the session's expiry. */
+export interface SessionLookup {
+  user: AuthUser & { sessionId: string }
+  renewed: boolean
 }
 
 export interface Credentials {
@@ -75,6 +92,8 @@ export interface ChangePasswordInput {
   user: AuthUser & { sessionId: string }
   currentPassword: string
   newPassword: string
+  /** Raw device-cookie value, if the browser sent one. */
+  deviceToken?: string | undefined
 }
 
 export interface AuthServiceOptions {
@@ -90,17 +109,25 @@ export const normalizeEmail = (email: string): string => email.trim().toLowerCas
 const invalidCredentials = () =>
   new AppError(401, 'INVALID_CREDENTIALS', 'Invalid email or password')
 
+const signupDisabled = (): AppError => new AppError(403, 'SIGNUP_DISABLED', 'Signup is disabled')
+
 const toAuthUser = (u: Pick<UserRow, 'id' | 'email' | 'is_owner'>): AuthUser => ({
   id: u.id,
   email: u.email,
   isOwner: u.is_owner === 1,
 })
 
-/** Signup, login, logout and session lookup, with every limit from the plan's Technical Details. */
+/** A fresh random cookie token (session or device); stored only as its `tokenHash`. */
+const newToken = (): string => randomBytes(32).toString('base64url')
+
+/**
+ * Signup, login, logout, password change and session lookup, with their rate limits (`AUTH_LIMITS`),
+ * the per-account login gate and the argon2 concurrency cap.
+ */
 export class AuthService {
   readonly passwords: PasswordService
-  readonly gate: LoginGate
-  readonly limits: { [K in keyof typeof AUTH_LIMITS]: RateLimiter }
+  private readonly gate: LoginGate
+  private readonly limits: { [K in keyof typeof AUTH_LIMITS]: RateLimiter }
   private readonly db: Db
   private readonly config: Config
   private readonly now: Clock
@@ -131,64 +158,84 @@ export class AuthService {
     return createHmac('sha256', this.config.sessionSecret).update(token).digest('hex')
   }
 
-  /** Throws 429 (with Retry-After) when `limiter` is exhausted for `key`. */
-  private enforce(limiter: RateLimiter, key: string): void {
-    if (limiter.isLimited(key)) {
-      throw tooManyRequests('Too many attempts, try again later', limiter.retryAfterMs(key))
-    }
+  /**
+   * Whether `POST /api/auth/signup` currently accepts new accounts: always with ALLOW_SIGNUP=true, never
+   * with ALLOW_SIGNUP=false, and by default only while no account exists (the owner's first-run signup).
+   */
+  signupOpen(): boolean {
+    const mode = this.config.signupMode
+    return mode === 'open' || (mode === 'first-user' && !hasUsers(this.db))
   }
 
-  async signup({ email, password, ip }: Credentials): Promise<AuthResult> {
-    if (!this.config.allowSignup) throw new AppError(403, 'SIGNUP_DISABLED', 'Signup is disabled')
+  async signup({ email, password, ip, deviceToken }: Credentials): Promise<AuthResult> {
+    if (!this.signupOpen()) throw signupDisabled()
     assertValidPassword(password)
     const ipk = ipKey(ip)
-    this.enforce(this.limits.signupsPerIp, ipk)
-    this.limits.signupsPerIp.hit(ipk)
+    this.limits.signupsPerIp.enforce(ipk, TOO_MANY_ATTEMPTS)
     if (findUserByEmail(this.db, email)) throw conflict('Email already registered', 'EMAIL_TAKEN')
 
     const hash = await this.passwords.hash(password)
     let user: UserRow
     try {
-      user = createUser(this.db, email, hash)
+      // first-user mode re-checks emptiness in the insert's transaction: of simultaneous first signups,
+      // only one creates an account
+      user = createUser(this.db, email, hash, { onlyIfFirst: this.config.signupMode === 'first-user' })
     } catch (err) {
+      if (err instanceof NotFirstUserError) throw signupDisabled()
       if (err instanceof EmailTakenError) throw conflict('Email already registered', 'EMAIL_TAKEN')
       throw err
     }
-    return this.startSession(user, undefined)
+    return this.startSession(user, undefined, deviceToken)
   }
 
   async login({ email, password, ip, deviceToken }: Credentials): Promise<AuthResult> {
     const ipk = ipKey(ip)
     const pairKey = `${ipk}\n${email}`
-    // every check below runs before any argon2 work
-    this.enforce(this.limits.loginSuccessesPerAccount, email)
-    this.enforce(this.limits.loginSuccessesPerIp, ipk)
-    this.enforce(this.limits.loginFailuresPerIp, ipk)
-    this.enforce(this.limits.loginFailuresPerAccountIp, pairKey)
+    const { loginFailuresPerIp, loginFailuresPerAccountIp } = this.limits
+    // Every check and reservation below runs synchronously, before any argon2 work (the first await).
+    // Attempts still verifying are reserved on the failure limits, so a parallel burst cannot exceed them.
+    this.limits.loginSuccessesPerAccount.check(email, TOO_MANY_ATTEMPTS)
+    this.limits.loginSuccessesPerIp.check(ipk, TOO_MANY_ATTEMPTS)
+    loginFailuresPerIp.check(ipk, TOO_MANY_ATTEMPTS)
+    loginFailuresPerAccountIp.check(pairKey, TOO_MANY_ATTEMPTS)
 
     const user = findUserByEmail(this.db, email)
     const device = user && deviceToken ? this.knownDeviceFor(user.id, deviceToken) : undefined
 
-    // A valid device cookie for this very account skips only the delay gate. Without one, the gate's
-    // synchronous check-and-set must happen before the first await below.
+    // A valid device cookie for this very account skips only the delay gate.
     if (!device) {
       const entry = this.gate.tryEnter(email)
-      if (!entry.ok) throw tooManyRequests('Too many attempts, try again later', entry.retryAfterMs)
+      if (!entry.ok) throw tooManyRequests(TOO_MANY_ATTEMPTS, entry.retryAfterMs)
     }
+    const gated = !device
+    loginFailuresPerIp.reserve(ipk)
+    loginFailuresPerAccountIp.reserve(pairKey)
 
-    const reserved = device !== undefined && user?.is_owner === 1
-    const ok = await this.passwords.verify(user?.password_hash ?? null, password, { reserved })
-    if (!ok || !user) {
-      this.limits.loginFailuresPerIp.hit(ipk)
-      this.limits.loginFailuresPerAccountIp.hit(pairKey)
-      this.gate.recordFailure(email)
-      throw invalidCredentials()
+    let ok = false
+    let verified = false
+    try {
+      const reserved = device !== undefined && user?.is_owner === 1
+      ok = await this.passwords.verify(user?.password_hash ?? null, password, { reserved })
+      verified = true
+    } finally {
+      loginFailuresPerIp.release(ipk)
+      loginFailuresPerAccountIp.release(pairKey)
+      // only a completed wrong verification is a failure (a 503 from the hash limiter is not a guess)
+      if (verified && (!ok || !user)) {
+        loginFailuresPerIp.hit(ipk)
+        loginFailuresPerAccountIp.hit(pairKey)
+        if (gated) this.gate.recordFailure(email)
+      } else if (verified) {
+        if (gated) this.gate.recordSuccess(email)
+      } else if (gated) {
+        this.gate.release(email)
+      }
     }
+    if (!ok || !user) throw invalidCredentials()
 
-    this.gate.recordSuccess(email)
     this.limits.loginSuccessesPerAccount.hit(email)
     this.limits.loginSuccessesPerIp.hit(ipk)
-    return this.startSession(user, device && deviceToken ? { row: device, token: deviceToken } : undefined)
+    return this.startSession(user, device && deviceToken ? { row: device, token: deviceToken } : undefined, deviceToken)
   }
 
   /** The `known_devices` row for `token` if it exists, belongs to `userId` and has not expired. */
@@ -199,22 +246,38 @@ export class AuthService {
     return row
   }
 
-  /** Creates a session; reuses the presented device row or registers a new device. */
+  /**
+   * True when `token` is a still-valid device of an account other than `userId`. Such a cookie is never
+   * replaced, so an owner who signs in to a second account in the same browser keeps a known owner device.
+   */
+  private isOtherAccountsDevice(userId: string, token: string | undefined): boolean {
+    if (!token) return false
+    const row = findKnownDevice(this.db, this.tokenHash(token))
+    return row !== undefined && row.user_id !== userId && row.last_used_at > this.nowSec() - DEVICE_TTL_SEC
+  }
+
+  /**
+   * Creates a session; reuses the presented device row, keeps another account's valid device cookie
+   * untouched (no device for this login), or registers a new device. Also prunes the user's expired
+   * sessions' and devices' rows.
+   */
   private startSession(
     user: UserRow,
     device: { row: KnownDeviceRow; token: string } | undefined,
+    presentedDeviceToken: string | undefined,
   ): AuthResult {
     const nowSec = this.nowSec()
     deleteExpiredSessions(this.db, nowSec)
-    const sessionToken = randomBytes(32).toString('base64url')
+    deleteExpiredKnownDevices(this.db, user.id, nowSec - DEVICE_TTL_SEC)
+    const sessionToken = newToken()
     createSession(this.db, user.id, this.tokenHash(sessionToken), nowSec + SESSION_TTL_SEC)
 
-    let deviceToken: string
+    let deviceToken: string | undefined
     if (device) {
       touchKnownDevice(this.db, device.row.id, nowSec)
       deviceToken = device.token
-    } else {
-      deviceToken = randomBytes(32).toString('base64url')
+    } else if (!this.isOtherAccountsDevice(user.id, presentedDeviceToken)) {
+      deviceToken = newToken()
       createKnownDevice(this.db, user.id, this.tokenHash(deviceToken), nowSec)
     }
     return { user: toAuthUser(user), sessionToken, deviceToken }
@@ -223,11 +286,17 @@ export class AuthService {
   /**
    * Changes the signed-in user's password. Every other session and every known device of the user is
    * dropped; the current session is kept and gets a fresh device, whose raw token is returned for the
-   * device cookie. Limited to 5 attempts / 15 min per user, checked before any argon2 work. Only an owner
-   * session may use the reserved hash slot.
+   * device cookie (undefined, and no device registered, when the browser holds another account's valid
+   * device cookie, which is kept). Limited to 5 attempts / 15 min per user, checked before any argon2
+   * work. Only an owner session may use the reserved hash slot.
    */
-  async changePassword({ user, currentPassword, newPassword }: ChangePasswordInput): Promise<{ deviceToken: string }> {
-    this.enforce(this.limits.changePasswordPerUser, user.id)
+  async changePassword({
+    user,
+    currentPassword,
+    newPassword,
+    deviceToken: presentedDeviceToken,
+  }: ChangePasswordInput): Promise<{ deviceToken: string | undefined }> {
+    this.limits.changePasswordPerUser.check(user.id, TOO_MANY_ATTEMPTS)
     assertValidPassword(newPassword)
     this.limits.changePasswordPerUser.hit(user.id)
 
@@ -239,14 +308,15 @@ export class AuthService {
     }
     const hash = await this.passwords.hash(newPassword, { reserved })
 
-    const deviceToken = randomBytes(32).toString('base64url')
+    const keepOther = this.isOtherAccountsDevice(user.id, presentedDeviceToken)
+    const deviceToken = keepOther ? undefined : newToken()
     this.db.transaction(() => {
       // the session may have been revoked (logout, reset CLI) while we were hashing
       if (!sessionExists(this.db, user.sessionId)) throw unauthorized()
       updatePasswordHash(this.db, user.id, hash)
       deleteUserSessions(this.db, user.id, user.sessionId)
       deleteUserKnownDevices(this.db, user.id)
-      createKnownDevice(this.db, user.id, this.tokenHash(deviceToken), this.nowSec())
+      if (deviceToken) createKnownDevice(this.db, user.id, this.tokenHash(deviceToken), this.nowSec())
     }).immediate()
     return { deviceToken }
   }
@@ -256,11 +326,21 @@ export class AuthService {
     if (sessionToken) deleteSessionByTokenHash(this.db, this.tokenHash(sessionToken))
   }
 
-  /** The user owning the unexpired session for `sessionToken`, or undefined. */
-  sessionUser(sessionToken: string | undefined): (AuthUser & { sessionId: string }) | undefined {
+  /**
+   * The user owning the unexpired session for `sessionToken`, or undefined. Sliding expiry: a session
+   * used with less than `SESSION_RENEW_BELOW_SEC` (15 days) left is extended to a full 30 days again
+   * (`renewed`, so the caller re-sets the cookie).
+   */
+  sessionUser(sessionToken: string | undefined): SessionLookup | undefined {
     if (!sessionToken) return undefined
-    const s = findSession(this.db, this.tokenHash(sessionToken), this.nowSec())
+    const nowSec = this.nowSec()
+    const s = findSession(this.db, this.tokenHash(sessionToken), nowSec)
     if (!s) return undefined
-    return { ...toAuthUser({ id: s.user_id, email: s.email, is_owner: s.is_owner }), sessionId: s.session_id }
+    const renewed = s.expires_at - nowSec < SESSION_RENEW_BELOW_SEC
+    if (renewed) extendSession(this.db, s.session_id, nowSec + SESSION_TTL_SEC)
+    return {
+      user: { ...toAuthUser({ id: s.user_id, email: s.email, is_owner: s.is_owner }), sessionId: s.session_id },
+      renewed,
+    }
   }
 }

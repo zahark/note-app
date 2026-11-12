@@ -2,8 +2,9 @@ import type { JSONContent } from '@tiptap/core'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createQueryClient } from '@/lib/queryClient'
 import { mockFetch, renderApp, type MockResponse, type RecordedRequest } from '@/test/utils'
-import { GENERIC_UNLOCK_ERROR } from './LockScreen'
+import { GENERIC_UNLOCK_ERROR } from './api'
 
 const NOTE_ID = '33333333-3333-4333-8333-333333333333'
 const AID = '0b4c2f7e-1d2a-4c3b-9e8f-0123456789ab'
@@ -122,11 +123,14 @@ describe('lock screen', () => {
 describe('unavailable view', () => {
   /** Renders a scenario and returns the markup of the page it ends on. */
   async function unavailableMarkup(path: string, routes: Record<string, MockResponse>, pin?: string) {
-    mockFetch(routes)
+    const { requests } = mockFetch(routes)
     const { unmount } = renderApp(path)
     if (pin) await unlockWith(pin)
     const markup = (await screen.findByTestId('shared-unavailable')).outerHTML
     unmount()
+    // each scenario made exactly the requests it describes (an unmatched URL would also end on the
+    // unavailable page, through the mock's default 404, and prove nothing)
+    expect(requests.map((r) => `${r.method} ${r.path}`).sort()).toEqual(Object.keys(routes).sort())
     return markup
   }
 
@@ -152,6 +156,53 @@ describe('unavailable view', () => {
     ]
     expect(new Set(pages).size).toBe(1)
     expect(pages[0]).toContain('This shared note is unavailable')
+  })
+})
+
+describe('server or network trouble', () => {
+  /** A query client that does not retry, so a failed load shows its page at once. */
+  function noRetryClient() {
+    const client = createQueryClient()
+    client.setDefaultOptions({ queries: { ...client.getDefaultOptions().queries, retry: false } })
+    return client
+  }
+
+  const serverError: MockResponse = { status: 500, body: { error: { code: 'INTERNAL', message: 'Server error' } } }
+  const networkDown = () => {
+    throw new TypeError('Failed to fetch')
+  }
+
+  it.each([
+    ['a server error', () => serverError],
+    ['a network error', networkDown],
+  ])('loading the note after %s offers a retry instead of the unavailable page', async (_name, failure) => {
+    let fail = true
+    mockFetch({ [signedNotePath]: () => (fail ? failure() : sharedNote()) })
+    renderApp(`/shared/${NOTE_ID}?exp=${EXP}&sig=${SIG}`, noRetryClient())
+
+    expect(await screen.findByText(/Could not load this note/)).toBeInTheDocument()
+    expect(screen.queryByTestId('shared-unavailable')).not.toBeInTheDocument()
+    fail = false
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByRole('heading', { name: 'Trip plan' })).toBeInTheDocument()
+  })
+
+  it.each([
+    ['a server error', () => serverError],
+    ['a network error', networkDown],
+  ])('unlocking after %s asks to try again in a moment, and a retry unlocks', async (_name, failure) => {
+    let fail = true
+    mockFetch({
+      [unlockPath]: () => (fail ? failure() : { body: { token: TOKEN, expires_at: 1999999999 } }),
+      [notePath]: sharedNote(),
+    })
+    renderApp(`/shared/${NOTE_ID}`)
+    await unlockWith('ABCD2345')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not unlock right now. Try again in a moment.')
+    fail = false
+    await unlockWith('ABCD2345')
+    expect(await screen.findByRole('heading', { name: 'Trip plan' })).toBeInTheDocument()
   })
 })
 
@@ -202,6 +253,12 @@ describe('shared images', () => {
       expect(req.init.credentials).toBe('omit')
     }
     expect(requests.map((r) => `${r.method} ${r.path}`)).toEqual([signedNotePath, signedAttachmentPath])
+  })
+
+  it('titles a note whose title is blank or whitespace "Untitled", as the sidebar does', async () => {
+    mockFetch({ [signedNotePath]: { body: { note: { title: '   ', content: doc(paragraph('Body')), attachment_ids: [] } } } })
+    renderApp(`/shared/${NOTE_ID}?exp=${EXP}&sig=${SIG}`)
+    expect(await screen.findByRole('heading', { name: 'Untitled' })).toBeInTheDocument()
   })
 
   it('leaves an image empty (no unresolved reference) when it cannot be loaded', async () => {

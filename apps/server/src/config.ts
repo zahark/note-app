@@ -9,8 +9,9 @@ export const DEFAULT_DATA_DIR = './data'
 export const MIN_SECRET_LENGTH = 32
 
 /**
- * Parsed TRUST_PROXY value, passed straight to Fastify's `trustProxy`:
- * `false` trusts nothing, a number trusts that many hops, a list trusts those proxy addresses/CIDRs.
+ * Parsed TRUST_PROXY value: `false` trusts nothing, a number trusts that many hops, a list trusts those
+ * proxy addresses/CIDRs. `fastifyTrustProxy` (app.ts) converts it into Fastify's `trustProxy` option
+ * (a hop count becomes a function, since Fastify 5 treats a bare number as "trust nothing").
  */
 export type TrustProxy = false | number | string[]
 
@@ -22,14 +23,24 @@ export interface Config {
   /** True when PUBLIC_ORIGIN is https, so cookies get the Secure flag. */
   secureCookies: boolean
   trustProxy: TrustProxy
-  allowSignup: boolean
+  /** Who may create an account through `POST /api/auth/signup` (see `SignupMode`). */
+  signupMode: SignupMode
   /** Absolute path to the directory holding the SQLite database and uploads. */
   dataDir: string
   host: string
   port: number
   /** Fastify log level; `debug` also logs each request's client address and IP key. */
   logLevel: LogLevel
+  /** Per-account limit on the total size of stored images, in MiB; 0 means no limit. */
+  uploadQuotaMb: number
 }
+
+/**
+ * ALLOW_SIGNUP, parsed: `first-user` (unset, the default) allows signup only while no account exists, so
+ * the owner can create theirs on first run; `open` (`true`/`1`) allows anyone to sign up; `closed`
+ * (`false`/`0`) refuses every signup, even on an empty database.
+ */
+export type SignupMode = 'first-user' | 'open' | 'closed'
 
 export const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'] as const
 export type LogLevel = (typeof LOG_LEVELS)[number]
@@ -111,10 +122,8 @@ const trustProxy = optional(
 )
 
 const allowSignup = optional(
-  z
-    .enum(['true', 'false', '1', '0'], { error: 'ALLOW_SIGNUP must be true or false' })
-    .default('true'),
-).transform((v) => v === 'true' || v === '1')
+  z.enum(['true', 'false', '1', '0'], { error: 'ALLOW_SIGNUP must be true or false (or unset)' }).optional(),
+).transform((v): SignupMode => (v === undefined ? 'first-user' : v === 'true' || v === '1' ? 'open' : 'closed'))
 
 const port = optional(
   z
@@ -123,6 +132,17 @@ const port = optional(
     .transform(Number)
     .pipe(z.number().int().min(1, 'PORT must be 1-65535').max(65535, 'PORT must be 1-65535'))
     .default(3000),
+)
+
+/** UPLOAD_QUOTA_MB when unset: 1 GiB of images per account. */
+export const DEFAULT_UPLOAD_QUOTA_MB = 1024
+
+const uploadQuotaMb = optional(
+  z
+    .string()
+    .regex(/^\d+$/, 'UPLOAD_QUOTA_MB must be a non-negative integer (MB; 0 = no limit)')
+    .transform(Number)
+    .default(DEFAULT_UPLOAD_QUOTA_MB),
 )
 
 const logLevel = optional(
@@ -139,6 +159,7 @@ const envSchema = z.object({
   HOST: optional(z.string().default('0.0.0.0')),
   PORT: port,
   LOG_LEVEL: logLevel,
+  UPLOAD_QUOTA_MB: uploadQuotaMb,
 })
 
 /**
@@ -161,10 +182,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     publicOrigin: e.PUBLIC_ORIGIN,
     secureCookies: e.PUBLIC_ORIGIN.startsWith('https:'),
     trustProxy: e.TRUST_PROXY,
-    allowSignup: e.ALLOW_SIGNUP,
+    signupMode: e.ALLOW_SIGNUP,
     dataDir: path.resolve(e.DATA_DIR),
     host: e.HOST,
     port: e.PORT,
     logLevel: e.LOG_LEVEL,
+    uploadQuotaMb: e.UPLOAD_QUOTA_MB,
   }
 }

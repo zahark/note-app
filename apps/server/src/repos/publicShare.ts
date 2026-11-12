@@ -1,8 +1,8 @@
 // The ONLY repo module allowed to query without a userId. Every function here documents why it is
 // unscoped. It is read-only apart from the attachment sweep's deletes.
 //
-// Task 9 added the sweep queries; Task 10 the share-state lookup used by unlock and link/token
-// verification; Task 11 the public shared-note and shared-attachment lookups.
+// Holds the attachment sweep's queries, the share-state lookup used by PIN unlock and link/token
+// verification, and the public shared-note and shared-attachment lookups.
 import type { Db } from '../db/index.js'
 import type { ShareType } from './notes.js'
 

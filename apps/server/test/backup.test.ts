@@ -5,7 +5,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import path from 'node:path'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BackupError, runBackup, UPLOADS_ARCHIVE_NAME } from '../src/cli/backup.js'
+import { runBackup, UPLOADS_ARCHIVE_NAME } from '../src/cli/backup.js'
+import { CliError } from '../src/cli/common.js'
 import { DB_FILE_NAME, openDataDb, type Db } from '../src/db/index.js'
 import { storeUpload, uploadsDir } from '../src/services/attachments.js'
 import { PNG, tmpDataDir } from './helpers/api.js'
@@ -30,7 +31,7 @@ afterEach(() => {
 })
 
 const upload = (data: Buffer = PNG) =>
-  storeUpload(db, dataDir, userId, { originalName: 'cat.png', declaredMime: 'image/png', data })
+  storeUpload(db, dataDir, userId, { originalName: 'cat.png', data })
 
 /** Lists a gzipped tarball with the system `tar`, so the archive format is checked by an independent reader. */
 const tarList = (archive: string): string[] =>
@@ -101,7 +102,7 @@ describe('runBackup', () => {
   it('refuses to run without a database and never overwrites an existing backup', async () => {
     const empty = tmpDataDir()
     try {
-      await expect(runBackup({ dataDir: empty, now: NOW })).rejects.toThrow(BackupError)
+      await expect(runBackup({ dataDir: empty, now: NOW })).rejects.toThrow(CliError)
       expect(existsSync(path.join(empty, 'backups'))).toBe(false)
     } finally {
       rmSync(empty, { recursive: true, force: true })

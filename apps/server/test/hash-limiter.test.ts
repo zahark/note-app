@@ -39,16 +39,20 @@ describe('HashLimiter', () => {
     const results = tasks.map((task) => limiter.run(task.fn))
     await tick()
     expect(tasks.filter((x) => x.running)).toHaveLength(4)
-    expect(limiter.inUse).toEqual({ general: 4, reserved: 0 })
 
     tasks[0]?.done()
     await tick()
     expect(tasks.filter((x) => x.running)).toHaveLength(5)
-    expect(limiter.inUse).toEqual({ general: 4, reserved: 0 })
 
     for (const task of tasks) task.done()
     await expect(Promise.all(results)).resolves.toEqual(Array(6).fill('ok'))
-    expect(limiter.inUse).toEqual({ general: 0, reserved: 0 })
+    // every slot was returned: 4 new tasks start at once
+    const again = Array.from({ length: 4 }, gatedTask)
+    const againResults = again.map((task) => limiter.run(task.fn))
+    await tick()
+    expect(again.filter((x) => x.running)).toHaveLength(4)
+    for (const task of again) task.done()
+    await Promise.all(againResults)
   })
 
   it('general work never uses the reserved slot; it waits briefly, then gets 503', async () => {
@@ -60,7 +64,6 @@ describe('HashLimiter', () => {
     const err = await limiter.run(async () => 'never').catch((e: unknown) => e)
     expect(err).toBeInstanceOf(AppError)
     expect((err as AppError).statusCode).toBe(503)
-    expect(limiter.inUse).toEqual({ general: 4, reserved: 0 })
 
     // owner-eligible work takes the reserved slot immediately
     await expect(limiter.run(async () => 'owner', { reserved: true })).resolves.toBe('owner')
@@ -76,7 +79,7 @@ describe('HashLimiter', () => {
     const owner1 = gatedTask()
     const owner1Result = limiter.run(owner1.fn, { reserved: true })
     await tick()
-    expect(limiter.inUse).toEqual({ general: 4, reserved: 1 })
+    expect(owner1.running).toBe(true)
 
     const general = gatedTask()
     const owner2 = gatedTask()
@@ -102,7 +105,7 @@ describe('reserved owner slot (HTTP)', () => {
   let secondSid: string
 
   beforeEach(async () => {
-    t = await makeApp({ hashWaitMs: 50 })
+    t = await makeApp({ hashWaitMs: 50, env: { ALLOW_SIGNUP: 'true' } })
     seedUser(t.db, 'owner@example.com')
     seedUser(t.db, 'second@example.com')
     const ownerLogin = await login(t.app, { email: 'owner@example.com' })
