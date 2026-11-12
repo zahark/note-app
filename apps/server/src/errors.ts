@@ -10,12 +10,15 @@ export interface ErrorBody {
 export class AppError extends Error {
   readonly statusCode: number
   readonly code: string
+  /** Extra response headers (e.g. `Retry-After` on a 429). */
+  readonly headers: Record<string, string>
 
-  constructor(statusCode: number, code: string, message: string) {
+  constructor(statusCode: number, code: string, message: string, headers: Record<string, string> = {}) {
     super(message)
     this.name = 'AppError'
     this.statusCode = statusCode
     this.code = code
+    this.headers = headers
   }
 }
 
@@ -26,8 +29,18 @@ export const unauthorized = (message = 'Authentication required') =>
 export const forbidden = (message = 'Forbidden') => new AppError(403, 'FORBIDDEN', message)
 export const notFound = (message = 'Not found') => new AppError(404, 'NOT_FOUND', message)
 export const conflict = (message = 'Conflict', code = 'CONFLICT') => new AppError(409, code, message)
-export const tooManyRequests = (message = 'Too many requests') =>
-  new AppError(429, 'RATE_LIMITED', message)
+/** 429; with `retryAfterMs`, also sends `Retry-After` in whole seconds (at least 1). */
+export const tooManyRequests = (message = 'Too many requests', retryAfterMs?: number) =>
+  new AppError(
+    429,
+    'RATE_LIMITED',
+    message,
+    retryAfterMs === undefined
+      ? {}
+      : { 'retry-after': String(Math.max(1, Math.ceil(retryAfterMs / 1000))) },
+  )
+export const serviceUnavailable = (message = 'Server busy, try again shortly') =>
+  new AppError(503, 'BUSY', message)
 
 export function errorBody(code: string, message: string): ErrorBody {
   return { error: { code, message } }
@@ -53,7 +66,7 @@ export function errorHandler(
   reply: FastifyReply,
 ): FastifyReply {
   if (err instanceof AppError) {
-    return reply.status(err.statusCode).send(errorBody(err.code, err.message))
+    return reply.status(err.statusCode).headers(err.headers).send(errorBody(err.code, err.message))
   }
   if (err instanceof ZodError) {
     const issue = err.issues[0]

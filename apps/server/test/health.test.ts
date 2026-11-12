@@ -6,10 +6,11 @@ import { loadConfig } from '../src/config.js'
 import { openDb, type Db } from '../src/db/index.js'
 import { conflict, notFound } from '../src/errors.js'
 
+const ORIGIN = 'http://localhost:3000'
 const config = loadConfig({
   SESSION_SECRET: 'a'.repeat(32),
   SHARE_HMAC_KEY: 'b'.repeat(32),
-  PUBLIC_ORIGIN: 'http://localhost:3000',
+  PUBLIC_ORIGIN: ORIGIN,
 })
 
 let app: FastifyInstance
@@ -75,7 +76,12 @@ describe('error format {error:{code,message}}', () => {
   })
 
   it('zod validation failures → 400 VALIDATION_ERROR', async () => {
-    const res = await app.inject({ method: 'POST', url: '/test/zod', payload: { name: 5 } })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test/zod',
+      headers: { origin: ORIGIN },
+      payload: { name: 5 },
+    })
     expect(res.statusCode).toBe(400)
     const body = res.json() as { error: { code: string; message: string } }
     expect(body.error.code).toBe('VALIDATION_ERROR')
@@ -86,7 +92,7 @@ describe('error format {error:{code,message}}', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/test/zod',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', origin: ORIGIN },
       payload: '{not json',
     })
     expect(res.statusCode).toBe(400)
@@ -99,7 +105,7 @@ describe('error format {error:{code,message}}', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/test/zod',
-      headers: { 'content-type': 'application/x-unknown' },
+      headers: { 'content-type': 'application/x-unknown', origin: ORIGIN },
       payload: 'x',
     })
     expect(res.statusCode).toBe(415)
