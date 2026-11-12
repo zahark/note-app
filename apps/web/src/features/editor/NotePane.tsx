@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { EditorContent, useEditor, type Editor } from '@tiptap/react'
 import { toast } from 'sonner'
@@ -6,13 +6,16 @@ import { Button } from '@/components/ui/button'
 import { ShareButton } from '@/features/share/ShareDialog'
 import { ApiError, errorMessage, isNotFound } from '@/lib/api'
 import {
+  ACCEPTED_FILE_EXTENSIONS,
   ACCEPTED_IMAGE_TYPES,
-  imageFileProblem,
-  imageFilesFrom,
+  checkUploadFile,
+  downloadOwnerAttachment,
   ownerAttachmentUrl,
   uploadAttachment,
+  uploadFilesFrom,
   useNote,
   type Note,
+  type UploadKind,
 } from './api'
 import { attachmentSrc } from './AttachmentImage'
 import { ConflictPrompt } from './ConflictPrompt'
@@ -88,17 +91,19 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
   const { status, schedule, error: saveError } = useAutosave({ noteId: note.id, version: note.version })
   const upload = useMutation({ mutationFn: uploadAttachment })
   const [uploading, setUploading] = useState(0)
+  const imageInput = useRef<HTMLInputElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
 
   /**
-   * Uploads each image, then inserts it (at `pos`, or at the cursor) as `attachment://<aid>`. A rate
-   * limit or full storage stops the batch with one message instead of one per remaining file.
+   * Uploads each file, then inserts it (at `pos`, or at the cursor) as `attachment://<aid>`: an image
+   * node for an image, a file node for a PDF or GPX. A rate limit or full storage stops the batch
+   * with one message instead of one per remaining file.
    */
-  const insertImages = async (editor: Editor, files: File[], pos?: number) => {
+  const insertAttachments = async (editor: Editor, files: File[], pos?: number) => {
     let at = pos
     for (const [index, file] of files.entries()) {
-      const problem = imageFileProblem(file)
-      if (problem) {
+      const { kind, problem } = checkUploadFile(file)
+      if (problem !== undefined) {
         toast.error(problem)
         continue
       }
@@ -106,7 +111,7 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
       try {
         const aid = await upload.mutateAsync(file)
         if (editor.isDestroyed) return
-        const node = { type: 'image', attrs: { src: attachmentSrc(aid), alt: file.name || null } }
+        const node = attachmentNode(kind, aid, file)
         if (at === undefined) {
           editor.chain().focus().insertContent(node).run()
         } else {
@@ -118,7 +123,7 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
         const stop = err instanceof ApiError && (err.status === 429 || err.code === 'QUOTA_EXCEEDED')
         const skipped = stop ? files.length - index - 1 : 0
         const rest = skipped > 0 ? ` (${skipped} more not uploaded)` : ''
-        toast.error(`Could not upload ${file.name || 'the image'}: ${errorMessage(err)}${rest}`)
+        toast.error(`Could not upload ${file.name || 'the file'}: ${errorMessage(err)}${rest}`)
         if (stop) return
       } finally {
         setUploading((n) => n - 1)
@@ -126,32 +131,36 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
     }
   }
   // the editor's paste/drop handlers are created once; they call the latest version through this ref
-  const insertImagesRef = useRef(insertImages)
+  const insertAttachmentsRef = useRef(insertAttachments)
   useEffect(() => {
-    insertImagesRef.current = insertImages
+    insertAttachmentsRef.current = insertAttachments
   })
 
   const editor = useEditor({
-    extensions: editorExtensions({ resolveAttachment: ownerAttachmentUrl, placeholder: 'Start writing…' }),
+    extensions: editorExtensions({
+      resolveAttachment: ownerAttachmentUrl,
+      downloadAttachment: downloadOwnerAttachment,
+      placeholder: 'Start writing…',
+    }),
     content: toEditorContent(note.content),
     onUpdate: ({ editor: e }) => schedule(e.getJSON()),
     editorProps: {
       attributes: { class: 'note-content', 'aria-label': 'Note content' },
       handlePaste: (view, event) => {
-        const files = imageFilesFrom(event.clipboardData)
+        const files = uploadFilesFrom(event.clipboardData)
         if (files.length === 0) return false
         const e = editorFromView(view)
-        if (e) void insertImagesRef.current(e, files)
+        if (e) void insertAttachmentsRef.current(e, files)
         return true
       },
       handleDrop: (view, event, _slice, moved) => {
         if (moved) return false
-        const files = imageFilesFrom(event.dataTransfer)
+        const files = uploadFilesFrom(event.dataTransfer)
         if (files.length === 0) return false
         event.preventDefault()
         const e = editorFromView(view)
         const pos = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos
-        if (e) void insertImagesRef.current(e, files, pos)
+        if (e) void insertAttachmentsRef.current(e, files, pos)
         return true
       },
     },
@@ -164,19 +173,23 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
 
   return (
     <div className="flex h-full flex-col">
-      <Toolbar editor={editor} uploading={uploading > 0} onInsertImage={() => fileInput.current?.click()} />
-      <input
-        ref={fileInput}
-        type="file"
+      <Toolbar
+        editor={editor}
+        uploading={uploading > 0}
+        onInsertImage={() => imageInput.current?.click()}
+        onAttachFile={() => fileInput.current?.click()}
+      />
+      <UploadInput
+        inputRef={imageInput}
         accept={ACCEPTED_IMAGE_TYPES.join(',')}
-        multiple
-        hidden
-        data-testid="image-file-input"
-        onChange={(event) => {
-          const files = Array.from(event.target.files ?? [])
-          event.target.value = ''
-          if (files.length) void insertImages(editor, files)
-        }}
+        testId="image-file-input"
+        onFiles={(files) => void insertAttachments(editor, files)}
+      />
+      <UploadInput
+        inputRef={fileInput}
+        accept={ACCEPTED_FILE_EXTENSIONS.join(',')}
+        testId="attach-file-input"
+        onFiles={(files) => void insertAttachments(editor, files)}
       />
       {status === 'conflict' && <ConflictPrompt editor={editor} onReload={onReload} />}
       <div className="min-h-0 flex-1 overflow-auto">
@@ -191,6 +204,39 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
       </div>
     </div>
   )
+}
+
+interface UploadInputProps {
+  inputRef: RefObject<HTMLInputElement | null>
+  accept: string
+  testId: string
+  onFiles: (files: File[]) => void
+}
+
+/** A hidden multi-file input opened by a toolbar button; it is cleared after each pick so the same file can be picked again. */
+function UploadInput({ inputRef, accept, testId, onFiles }: UploadInputProps) {
+  return (
+    <input
+      ref={inputRef}
+      type="file"
+      accept={accept}
+      multiple
+      hidden
+      data-testid={testId}
+      onChange={(event) => {
+        const files = Array.from(event.target.files ?? [])
+        event.target.value = ''
+        if (files.length) onFiles(files)
+      }}
+    />
+  )
+}
+
+/** The node an uploaded file becomes: an image, or a file node (PDF, GPX) carrying its name and size for display. */
+function attachmentNode(kind: UploadKind, aid: string, file: File) {
+  const src = attachmentSrc(aid)
+  if (kind === 'image') return { type: 'image', attrs: { src, alt: file.name || null } }
+  return { type: 'attachmentFile', attrs: { src, name: file.name || null, size: file.size, kind } }
 }
 
 /** The TipTap editor a ProseMirror view belongs to (TipTap sets `view.dom.editor`). */

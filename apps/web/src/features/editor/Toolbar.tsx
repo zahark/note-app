@@ -12,6 +12,7 @@ import {
   ListIcon,
   ListOrderedIcon,
   ListTodoIcon,
+  PaperclipIcon,
   QuoteIcon,
   Redo2Icon,
   SquareCodeIcon,
@@ -25,7 +26,9 @@ interface ToolbarProps {
   editor: Editor
   /** Opens the image file picker. */
   onInsertImage: () => void
-  /** An image upload is in progress. */
+  /** Opens the PDF/GPX file picker. */
+  onAttachFile: () => void
+  /** An upload is in progress. */
   uploading?: boolean
 }
 
@@ -70,7 +73,7 @@ function editLink(editor: Editor) {
 }
 
 /** Formatting toolbar for the note editor. */
-export function Toolbar({ editor, onInsertImage, uploading }: ToolbarProps) {
+export function Toolbar({ editor, onInsertImage, onAttachFile, uploading }: ToolbarProps) {
   const state = useEditorState({
     editor,
     selector: ({ editor: e }) => ({
@@ -160,6 +163,7 @@ export function Toolbar({ editor, onInsertImage, uploading }: ToolbarProps) {
       />
       <Separator />
       <ToolbarButton label="Insert image" icon={ImagePlusIcon} disabled={uploading} onClick={onInsertImage} />
+      <ToolbarButton label="Attach file" icon={PaperclipIcon} disabled={uploading} onClick={onAttachFile} />
     </div>
   )
 }

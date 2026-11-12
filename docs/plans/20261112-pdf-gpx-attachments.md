@@ -114,9 +114,9 @@
 - Modify: `apps/web/src/features/editor/api.ts`, `apps/web/src/features/editor/NotePane.tsx`, `apps/web/src/features/editor/Toolbar.tsx`
 - Modify: `apps/web/src/features/editor/NotePane.test.ts`
 
-- [ ] write tests: toolbar "Attach file" opens a file input accepting `.pdf,.gpx`; a PDF inserts a `pdf` file node, a GPX (type `''` or `application/octet-stream`, `.gpx` name) inserts a `gpx` file node, an image still inserts an image node; drag-and-drop and paste route the same way; an unsupported file shows a clear toast; per-kind size limits checked client-side; batch stops at the first 429/quota error with one toast (existing behaviour) for mixed batches
-- [ ] implement per-kind client checks and routing; keep `uploadAttachment` as the single upload call; owner `downloadAttachment` = navigate an anchor to `/api/attachments/:aid`
-- [ ] run tests — must pass before task 6
+- [x] write tests: toolbar "Attach file" opens a file input accepting `.pdf,.gpx`; a PDF inserts a `pdf` file node, a GPX (type `''` or `application/octet-stream`, `.gpx` name) inserts a `gpx` file node, an image still inserts an image node; drag-and-drop and paste route the same way; an unsupported file shows a clear toast; per-kind size limits checked client-side; batch stops at the first 429/quota error with one toast (existing behaviour) for mixed batches
+- [x] implement per-kind client checks and routing; keep `uploadAttachment` as the single upload call; owner `downloadAttachment` = navigate an anchor to `/api/attachments/:aid`
+- [x] run tests — must pass before task 6
 
 ### Task 6: Shared view support
 
