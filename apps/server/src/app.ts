@@ -1,4 +1,12 @@
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import fastifyStatic from '@fastify/static'
+import Fastify, {
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+  type FastifyServerOptions,
+} from 'fastify'
 import type { Config, TrustProxy } from './config.js'
 import type { Db } from './db/index.js'
 import { errorBody, errorHandler } from './errors.js'
@@ -33,7 +41,23 @@ export interface BuildAppOptions {
    * touch an uploads directory they did not set up; the server entry point turns it on.
    */
   attachmentSweep?: boolean
+  /**
+   * Directory with the built web app (`index.html` + assets). When set, its files are served and every
+   * other GET of a non-API path falls back to `index.html`; when unset the app serves the API only.
+   */
+  webDir?: string
 }
+
+/** Where the built SPA lives relative to this module: `apps/web/dist` from both `src/` and `dist/`. */
+export function defaultWebDir(): string {
+  return fileURLToPath(new URL('../../web/dist', import.meta.url))
+}
+
+/** Matches every API URL (`/api`, `/api/...`, `/api?...`); these never fall back to the SPA. */
+const API_URL = /^\/api(?:[/?]|$)/
+/** Matches the shared-note page (`/shared`, `/shared/...`, `/shared?...`). */
+const SHARED_PAGE_URL = /^\/shared(?:[/?]|$)/
+const SPA_INDEX = 'index.html'
 
 /** How often the attachment sweep runs after the boot-time run. */
 export const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -72,6 +96,7 @@ export function buildApp({
   logger = false,
   auth = {},
   attachmentSweep = false,
+  webDir,
 }: BuildAppOptions): FastifyInstance {
   const app = Fastify({ logger, trustProxy: fastifyTrustProxy(config.trustProxy) })
 
@@ -80,9 +105,11 @@ export function buildApp({
   app.setErrorHandler(errorHandler)
   // no-referrer / noindex / no-store on every public shared API response, errors and 404s included
   app.addHook('onSend', sharedApiHeaders)
-  app.setNotFoundHandler((_request, reply) =>
-    reply.status(404).send(errorBody('NOT_FOUND', 'Not found')),
-  )
+  if (webDir === undefined) {
+    app.setNotFoundHandler((_request, reply) => sendNotFound(reply))
+  } else {
+    registerWebApp(app, webDir)
+  }
 
   // cookies, the CSRF Origin check and the auth guard come before every route
   const authService = new AuthService({ db, config, ...auth })
@@ -104,6 +131,47 @@ export function buildApp({
   if (attachmentSweep) scheduleAttachmentSweep(app)
 
   return app
+}
+
+function sendNotFound(reply: FastifyReply): FastifyReply {
+  return reply.status(404).send(errorBody('NOT_FOUND', 'Not found'))
+}
+
+/**
+ * True for requests the SPA should answer: a GET/HEAD of a non-API path whose last segment has no
+ * file extension (a missing `/assets/x.js` stays a 404 instead of returning HTML as JavaScript).
+ */
+function isClientRoute(request: FastifyRequest): boolean {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return false
+  if (API_URL.test(request.url)) return false
+  const pathname = request.url.split('?', 1)[0] ?? ''
+  const lastSegment = pathname.slice(pathname.lastIndexOf('/') + 1)
+  return !lastSegment.includes('.')
+}
+
+/**
+ * Serves the built web app from `webDir` with an SPA fallback: client routes (`/`, `/login`,
+ * `/shared/:id`, ...) get `index.html`; unknown API paths, other methods and missing files get the
+ * JSON 404. The HTML shell is `no-cache` so a new deploy is picked up, and the shared-note page is kept
+ * out of referrers (its URL can carry a signed link's `sig`) and search indexes.
+ */
+function registerWebApp(app: FastifyInstance, webDir: string): void {
+  app.register(fastifyStatic, {
+    root: webDir,
+    // the HTML shell (served for `/` and the fallback) must be revalidated; hashed assets keep the defaults
+    setHeaders: (reply, filePath) => {
+      if (path.basename(filePath) === SPA_INDEX) reply.header('cache-control', 'no-cache')
+    },
+  })
+  app.setNotFoundHandler((request, reply) => {
+    if (!isClientRoute(request)) return sendNotFound(reply)
+    return reply.sendFile(SPA_INDEX)
+  })
+  app.addHook('onSend', async (request, reply) => {
+    if (!SHARED_PAGE_URL.test(request.url)) return
+    reply.header('referrer-policy', 'no-referrer')
+    reply.header('x-robots-tag', 'noindex')
+  })
 }
 
 /** Runs the attachment sweep at boot (once the app is ready) and then every 24 hours; failures are logged, never fatal. */

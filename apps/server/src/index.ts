@@ -1,5 +1,7 @@
 // Server entry point: validate config (refusing to boot on bad config), build the app, listen.
-import { buildApp } from './app.js'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import { buildApp, defaultWebDir } from './app.js'
 import { ConfigError, loadConfig, type Config } from './config.js'
 import { openDataDb } from './db/index.js'
 import { appInfo } from './meta.js'
@@ -18,12 +20,23 @@ async function main(): Promise<void> {
 
   // opening the database runs any pending migrations, so the schema is current before listening
   const db = openDataDb(config.dataDir)
-  const app = buildApp({ config, db, logger: true, attachmentSweep: true })
+  // the built SPA is served from apps/web/dist when present; without it (e.g. `npm run dev`, where Vite
+  // serves the web app) the server answers the API only
+  const webDir = defaultWebDir()
+  const hasWebBuild = existsSync(path.join(webDir, 'index.html'))
+  const app = buildApp({
+    config,
+    db,
+    logger: true,
+    attachmentSweep: true,
+    webDir: hasWebBuild ? webDir : undefined,
+  })
   app.addHook('onClose', async () => {
     db.close()
   })
   const { name, version } = appInfo()
   app.log.info(`${name} server ${version} starting`)
+  if (!hasWebBuild) app.log.warn(`no web build at ${webDir}; serving the API only`)
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {
