@@ -4,7 +4,12 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/lib/queryClient'
 import { mockFetch, renderApp, type MockResponse, type RecordedRequest } from '@/test/utils'
-import { GENERIC_UNLOCK_ERROR } from './api'
+import { loadPdf, type PdfDocument } from '@/features/editor/pdf'
+import { fileNameFromDisposition, GENERIC_UNLOCK_ERROR } from './api'
+
+// PDF.js is mocked at the `pdf.ts` boundary
+vi.mock('@/features/editor/pdf', () => ({ loadPdf: vi.fn() }))
+const loadPdfMock = vi.mocked(loadPdf)
 
 const NOTE_ID = '33333333-3333-4333-8333-333333333333'
 const AID = '0b4c2f7e-1d2a-4c3b-9e8f-0123456789ab'
@@ -27,6 +32,11 @@ const doc = (...content: JSONContent[]): JSONContent => ({ type: 'doc', content 
 const paragraph = (text: string): JSONContent => ({ type: 'paragraph', content: [{ type: 'text', text }] })
 const image = (aid: string): JSONContent => ({ type: 'image', attrs: { src: `attachment://${aid}` } })
 
+const fileNode = (aid: string, kind: 'pdf' | 'gpx', name: string, size = 1234): JSONContent => ({
+  type: 'attachmentFile',
+  attrs: { src: `attachment://${aid}`, name, size, kind },
+})
+
 const sharedNote = (content: JSONContent = doc(paragraph('Shared body'))): MockResponse => ({
   body: { note: { title: 'Trip plan', content, attachment_ids: [AID] } },
 })
@@ -36,6 +46,7 @@ const headersOf = (req: RecordedRequest) => (req.init.headers ?? {}) as Record<s
 let blobCount = 0
 beforeEach(() => {
   blobCount = 0
+  loadPdfMock.mockReset()
   Object.defineProperty(URL, 'createObjectURL', {
     configurable: true,
     writable: true,
@@ -269,5 +280,168 @@ describe('shared images', () => {
     await waitFor(() => expect(img).toHaveAttribute('data-load-error', 'true'))
     expect(img).not.toHaveAttribute('src')
     expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+})
+
+/** A loaded PDF of `numPages` pages whose page renders all succeed. */
+function stubPdf(numPages: number) {
+  const renderPage = vi.fn<PdfDocument['renderPage']>(() => ({ promise: Promise.resolve(), cancel: vi.fn() }))
+  const destroy = vi.fn<() => void>()
+  loadPdfMock.mockReturnValue({ promise: Promise.resolve({ numPages, renderPage }), destroy })
+  return { renderPage, destroy }
+}
+
+/** Records the download anchors clicked (jsdom cannot navigate to them). */
+function captureDownloads() {
+  const clicked: { href: string; download: string; connected: boolean }[] = []
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+    clicked.push({ href: this.getAttribute('href')!, download: this.download, connected: this.isConnected })
+  })
+  return clicked
+}
+
+const pdfBytes = { body: '%PDF-1.7', headers: { 'content-type': 'application/pdf' } }
+const BLOB_1 = 'blob:http://localhost/1'
+
+describe('shared files', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('PIN mode: a PDF shows the viewer, its bytes fetched with the token in a header and read from a blob URL', async () => {
+    const pdf = stubPdf(2)
+    const { requests } = mockFetch({
+      [unlockPath]: { body: { token: TOKEN, expires_at: 1999999999 } },
+      [notePath]: sharedNote(doc(paragraph('Route'), fileNode(AID, 'pdf', 'guide.pdf'))),
+      [attachmentPath]: pdfBytes,
+      [`GET ${BLOB_1}`]: pdfBytes,
+    })
+    const { container, unmount } = renderApp(`/shared/${NOTE_ID}`)
+    await unlockWith('ABCD2345')
+
+    expect(await screen.findByText('Page 1 of 2')).toBeInTheDocument()
+    expect(container.querySelector(`[data-attachment-id="${AID}"] [data-role="pdf-viewer"]`)).not.toBeNull()
+    expect(pdf.renderPage).toHaveBeenCalledWith(1, expect.any(HTMLCanvasElement), expect.any(Number))
+
+    const fetchPdf = requests.find((r) => `${r.method} ${r.path}` === attachmentPath)!
+    expect(headersOf(fetchPdf).authorization).toBe(`Bearer ${TOKEN}`)
+    expect(fetchPdf.init.credentials).toBe('omit')
+    // the API is asked once; PDF.js gets the bytes already loaded (from the blob URL), never the API URL
+    expect(new Set(requests.map((r) => `${r.method} ${r.path}`))).toEqual(
+      new Set([unlockPath, notePath, attachmentPath, `GET ${BLOB_1}`]),
+    )
+    expect(requests.filter((r) => `${r.method} ${r.path}` === attachmentPath)).toHaveLength(1)
+
+    for (const req of requests) expect(req.path).not.toContain(TOKEN)
+    expect(container.innerHTML).not.toContain(TOKEN)
+
+    unmount()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith(BLOB_1)
+    // the viewer's own root unmounts a microtask later, destroying the PDF
+    await waitFor(() => expect(pdf.destroy).toHaveBeenCalled())
+  })
+
+  it('signed mode: a PDF is fetched with the page exp/sig and no Authorization header', async () => {
+    stubPdf(1)
+    const { requests } = mockFetch({
+      [signedNotePath]: sharedNote(doc(fileNode(AID, 'pdf', 'guide.pdf'))),
+      [signedAttachmentPath]: pdfBytes,
+      [`GET ${BLOB_1}`]: pdfBytes,
+    })
+    renderApp(`/shared/${NOTE_ID}?exp=${EXP}&sig=${SIG}`)
+
+    expect(await screen.findByText('Page 1 of 1')).toBeInTheDocument()
+    expect(new Set(requests.map((r) => `${r.method} ${r.path}`))).toEqual(
+      new Set([signedNotePath, signedAttachmentPath, `GET ${BLOB_1}`]),
+    )
+    expect(requests.filter((r) => `${r.method} ${r.path}` === signedAttachmentPath)).toHaveLength(1)
+    for (const req of requests) expect(headersOf(req).authorization).toBeUndefined()
+  })
+
+  it('PIN mode: a GPX chip downloads through a credentialed fetch and a blob URL named after the stored file', async () => {
+    const clicked = captureDownloads()
+    const { requests } = mockFetch({
+      [unlockPath]: { body: { token: TOKEN, expires_at: 1999999999 } },
+      [notePath]: sharedNote(doc(fileNode(AID, 'gpx', 'ride.gpx'))),
+      [attachmentPath]: {
+        body: '<gpx/>',
+        headers: {
+          'content-type': 'application/gpx+xml',
+          'content-disposition': `attachment; filename="_____ ride.gpx"; filename*=UTF-8''%D0%A2%D1%80%D0%B0%D1%81%D1%81%D0%B0%20ride.gpx`,
+        },
+      },
+    })
+    const { container, unmount } = renderApp(`/shared/${NOTE_ID}`)
+    await unlockWith('ABCD2345')
+
+    const button = await screen.findByRole('button', { name: 'Download ride.gpx' })
+    // a GPX gets no viewer, and nothing is fetched until Download is pressed
+    expect(container.querySelector('[data-role="pdf-viewer"]')).toBeNull()
+    expect(requests.some((r) => r.path.includes('/attachments/'))).toBe(false)
+
+    await userEvent.setup().click(button)
+    await waitFor(() => expect(clicked).toEqual([{ href: BLOB_1, download: 'Трасса ride.gpx', connected: true }]))
+
+    const fetchGpx = requests.find((r) => `${r.method} ${r.path}` === attachmentPath)!
+    expect(headersOf(fetchGpx).authorization).toBe(`Bearer ${TOKEN}`)
+    expect(fetchGpx.init.credentials).toBe('omit')
+    for (const req of requests) expect(req.path).not.toContain(TOKEN)
+    for (const { href } of clicked) expect(href).not.toContain(TOKEN)
+    expect(container.innerHTML).not.toContain(TOKEN)
+    // the anchor is temporary
+    expect(document.querySelector(`a[href="${BLOB_1}"]`)).toBeNull()
+
+    unmount()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith(BLOB_1)
+  })
+
+  it('signed mode: a download without a stored name uses the chip name, and repeats reuse the fetched blob', async () => {
+    const clicked = captureDownloads()
+    const { requests } = mockFetch({
+      [signedNotePath]: sharedNote(doc(fileNode(AID, 'gpx', 'ride.gpx'))),
+      [signedAttachmentPath]: { body: '<gpx/>', headers: { 'content-type': 'application/gpx+xml' } },
+    })
+    renderApp(`/shared/${NOTE_ID}?exp=${EXP}&sig=${SIG}`)
+
+    const user = userEvent.setup()
+    const button = await screen.findByRole('button', { name: 'Download ride.gpx' })
+    await user.click(button)
+    await waitFor(() => expect(clicked).toHaveLength(1))
+    await user.click(button)
+    await waitFor(() => expect(clicked).toHaveLength(2))
+
+    expect(clicked[0]).toEqual({ href: BLOB_1, download: 'ride.gpx', connected: true })
+    expect(clicked[1]).toEqual(clicked[0])
+    expect(requests.filter((r) => `${r.method} ${r.path}` === signedAttachmentPath)).toHaveLength(1)
+    for (const req of requests) expect(headersOf(req).authorization).toBeUndefined()
+  })
+
+  it('a PDF that cannot be fetched shows the viewer error state, not the unavailable page; Download reports its failure', async () => {
+    const clicked = captureDownloads()
+    mockFetch({
+      [signedNotePath]: sharedNote(doc(paragraph('Still here'), fileNode(AID, 'pdf', 'guide.pdf'))),
+      [signedAttachmentPath]: unavailable,
+    })
+    renderApp(`/shared/${NOTE_ID}?exp=${EXP}&sig=${SIG}`)
+
+    expect(await screen.findByText('Preview unavailable, download instead')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Trip plan' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Shared note content')).toHaveTextContent('Still here')
+    expect(screen.queryByTestId('shared-unavailable')).not.toBeInTheDocument()
+    expect(loadPdfMock).not.toHaveBeenCalled()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Download guide.pdf' }))
+    expect(await screen.findByText('Could not download guide.pdf. Try again in a moment.')).toBeInTheDocument()
+    expect(clicked).toEqual([])
+    expect(screen.queryByTestId('shared-unavailable')).not.toBeInTheDocument()
+  })
+})
+
+describe('fileNameFromDisposition', () => {
+  it('prefers the UTF-8 filename*, falls back to the quoted filename, and is null without either', () => {
+    expect(fileNameFromDisposition(`attachment; filename="a_b.pdf"; filename*=UTF-8''a%22b%3B.pdf`)).toBe('a"b;.pdf')
+    expect(fileNameFromDisposition('attachment; filename="plain.gpx"')).toBe('plain.gpx')
+    expect(fileNameFromDisposition(`attachment; filename="safe.pdf"; filename*=UTF-8''%E0%A4%A.pdf`)).toBe('safe.pdf')
+    expect(fileNameFromDisposition('attachment')).toBeNull()
+    expect(fileNameFromDisposition(null)).toBeNull()
   })
 })

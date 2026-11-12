@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { EditorContent, useEditor } from '@tiptap/react'
 import { useParams, useSearchParams } from 'react-router'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { editorExtensions, toEditorContent } from '@/features/editor/extensions'
 import { displayTitle } from '@/features/tree/buildTree'
@@ -88,14 +89,22 @@ interface SharedNoteContentProps {
   note: SharedNote
 }
 
-/** Read-only TipTap with the shared schema; images are fetched with the credential and shown as blob URLs. */
+/**
+ * Read-only TipTap with the shared schema. Images and files are fetched with the credential and shown
+ * as blob URLs (the PDF viewer reads its bytes from one); a file's Download saves that blob.
+ */
 function SharedNoteContent({ noteId, credential, note }: SharedNoteContentProps) {
   const [resolver] = useState(() => createSharedAttachmentResolver(noteId, credential))
   useEffect(() => () => resolver.dispose(), [resolver])
 
   const editor = useEditor({
     editable: false,
-    extensions: editorExtensions({ resolveAttachment: resolver.resolve }),
+    extensions: editorExtensions({
+      resolveAttachment: resolver.resolve,
+      downloadAttachment: (aid, name) => {
+        resolver.download(aid, name).catch(() => toast.error(`Could not download ${name}. Try again in a moment.`))
+      },
+    }),
     content: toEditorContent(note.content),
     editorProps: { attributes: { class: 'note-content', 'aria-label': 'Shared note content' } },
   })

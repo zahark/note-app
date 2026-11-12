@@ -114,46 +114,92 @@ export async function fetchSharedNote(noteId: string, credential: SharedCredenti
   return (await apiFetch<{ note: SharedNote }>(url, { headers, signal, credentials: 'omit' })).note
 }
 
-/** The shared-attachment URL and headers for image `aid` of note `noteId`. */
+/** The shared-attachment URL and headers for attachment `aid` of note `noteId`. */
 const sharedAttachmentRequest = (noteId: string, aid: string, credential: SharedCredential) =>
   withCredential(`${sharedApiPath(noteId)}/attachments/${encodeURIComponent(aid)}`, credential)
 
+/**
+ * The file name from a `Content-Disposition` header: the RFC 5987 `filename*=UTF-8''…` form the server
+ * sends, else the plain `filename="…"`; null when there is none (images) or it cannot be decoded.
+ */
+export function fileNameFromDisposition(header: string | null): string | null {
+  if (!header) return null
+  const extended = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header)
+  if (extended) {
+    try {
+      const name = decodeURIComponent(extended[1]!.trim())
+      if (name) return name
+    } catch {
+      // malformed encoding: fall back to the plain form
+    }
+  }
+  const plain = /filename\s*=\s*"([^"]*)"/i.exec(header)
+  return plain?.[1] ? plain[1] : null
+}
+
 export interface SharedAttachmentResolver {
   resolve: AttachmentResolver
+  /**
+   * Saves file attachment `aid`: fetched with the credential (as for `resolve`, sharing its cache),
+   * then a blob-URL download named after the server's stored name, else `name`. Rejects when the
+   * file cannot be fetched; the caller reports it.
+   */
+  download: (aid: string, name: string) => Promise<void>
   /** Revokes every blob URL handed out so far. */
   dispose: () => void
 }
 
+interface LoadedAttachment {
+  blobUrl: string
+  /** The server's stored file name (`Content-Disposition`), for file kinds; null for images. */
+  fileName: string | null
+}
+
 /**
- * Resolves `attachment://<aid>` images of a shared note to blob URLs: each image is fetched once
- * from `/api/shared/:id/attachments/:aid` with the credential (token in a header, never in a URL).
+ * Resolves `attachment://<aid>` images and files of a shared note to blob URLs: each attachment is
+ * fetched once from `/api/shared/:id/attachments/:aid` with the credential (token in a header, never
+ * in a URL). The PDF viewer reads its bytes from that blob URL, and a download saves it.
  */
 export function createSharedAttachmentResolver(noteId: string, credential: SharedCredential): SharedAttachmentResolver {
-  const cache = new Map<string, Promise<string>>()
+  const cache = new Map<string, Promise<LoadedAttachment>>()
   const blobUrls = new Set<string>()
 
-  const load = async (aid: string): Promise<string> => {
+  const load = async (aid: string): Promise<LoadedAttachment> => {
     const { url, headers } = sharedAttachmentRequest(noteId, aid, credential)
     const res = await fetch(url, { headers, credentials: 'omit' })
-    if (!res.ok) throw new ApiError(res.status, 'UNAVAILABLE', 'Image unavailable')
-    const blobUrl = URL.createObjectURL(await res.blob())
+    if (!res.ok) throw new ApiError(res.status, 'UNAVAILABLE', 'Attachment unavailable')
+    const blob = await res.blob()
+    const blobUrl = URL.createObjectURL(blob)
     blobUrls.add(blobUrl)
-    return blobUrl
+    return { blobUrl, fileName: fileNameFromDisposition(res.headers.get('content-disposition')) }
+  }
+
+  const get = (aid: string): Promise<LoadedAttachment> => {
+    let pending = cache.get(aid)
+    if (!pending) {
+      const loading = load(aid)
+      // a failed attachment may be retried the next time it is rendered or downloaded
+      loading.catch(() => {
+        if (cache.get(aid) === loading) cache.delete(aid)
+      })
+      cache.set(aid, loading)
+      pending = loading
+    }
+    return pending
   }
 
   return {
-    resolve: (aid) => {
-      let pending = cache.get(aid)
-      if (!pending) {
-        const loading = load(aid)
-        // a failed image may be retried the next time it is rendered
-        loading.catch(() => {
-          if (cache.get(aid) === loading) cache.delete(aid)
-        })
-        cache.set(aid, loading)
-        pending = loading
-      }
-      return pending
+    resolve: async (aid) => (await get(aid)).blobUrl,
+    download: async (aid, name) => {
+      const { blobUrl, fileName } = await get(aid)
+      // the blob URL stays cached (and is revoked on dispose), so the browser can finish saving it
+      const anchor = document.createElement('a')
+      anchor.href = blobUrl
+      anchor.download = fileName ?? name
+      anchor.hidden = true
+      document.body.append(anchor)
+      anchor.click()
+      anchor.remove()
     },
     dispose: () => {
       for (const blobUrl of blobUrls) URL.revokeObjectURL(blobUrl)

@@ -124,9 +124,10 @@
 - Modify: `apps/web/src/features/share/api.ts`, `apps/web/src/features/share/SharedView.tsx`
 - Modify: `apps/web/src/features/share/SharedView.test.tsx`
 
-- [ ] write tests: a shared note with a PDF shows the viewer, its bytes are fetched from `/api/shared/:id/attachments/:aid` with the token in a header (PIN mode) or `exp`/`sig` (signed mode); a GPX chip downloads via a credentialed fetch and a blob URL named after the file; the token never appears in any URL; blob URLs are revoked on unmount; a failed fetch shows the error state, not the "unavailable" page
-- [ ] implement the shared resolver/downloader for file nodes (reuse the existing credentialed fetch)
-- [ ] run tests — must pass before task 7
+- [x] write tests: a shared note with a PDF shows the viewer, its bytes are fetched from `/api/shared/:id/attachments/:aid` with the token in a header (PIN mode) or `exp`/`sig` (signed mode); a GPX chip downloads via a credentialed fetch and a blob URL named after the file; the token never appears in any URL; blob URLs are revoked on unmount; a failed fetch shows the error state, not the "unavailable" page
+- [x] implement the shared resolver/downloader for file nodes (reuse the existing credentialed fetch)
+  - `createSharedAttachmentResolver` gained `download(aid, name)`: it shares the resolver's cache (one credentialed fetch per attachment), saves the blob URL under the server's `Content-Disposition` name (`fileNameFromDisposition`), else the chip name; the blob URL stays cached until unmount; a failed download shows a toast
+- [x] run tests — must pass before task 7
 
 ### Task 7: E2E coverage and CSP check
 
