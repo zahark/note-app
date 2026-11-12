@@ -18,6 +18,7 @@ import {
   createNote,
   deleteNote,
   getNote,
+  getNoteSummary,
   listNoteSummaries,
   renameNote,
   saveNoteContent,
@@ -83,6 +84,7 @@ describe('owner-scoped repos require a userId', () => {
         'folders.deleteFolder',
         'notes.createNote',
         'notes.getNote',
+        'notes.getNoteSummary',
         'notes.listNoteSummaries',
         'notes.renameNote',
         'notes.saveNoteContent',
@@ -197,6 +199,7 @@ describe('notes repo', () => {
     const note = createNote(db, alice, { folderId: null })!
     db.prepare(`UPDATE notes SET share_secret = 'secret' WHERE id = ?`).run(note.id)
     expect(getNote(db, alice, note.id)).not.toHaveProperty('share_secret')
+    expect(getNoteSummary(db, alice, note.id)).not.toHaveProperty('share_secret')
     expect(listNoteSummaries(db, alice)[0]).not.toHaveProperty('share_secret')
   })
 
@@ -214,6 +217,7 @@ describe('notes repo', () => {
     const mine = listNoteSummaries(db, alice)
     expect(mine.map((n) => n.title).sort()).toEqual(['A1', 'A2'])
     for (const n of mine) expect(n).not.toHaveProperty('content')
+    expect(getNoteSummary(db, alice, mine[0]!.id)).toEqual(mine[0])
     expect(listNoteSummaries(db, bob).map((n) => n.title)).toEqual(['B1'])
   })
 
@@ -244,6 +248,7 @@ describe('notes repo', () => {
     saveNoteContent(db, alice, note.id, doc('secret'), 1)
 
     expect(getNote(db, bob, note.id)).toBeUndefined()
+    expect(getNoteSummary(db, bob, note.id)).toBeUndefined()
     expect(renameNote(db, bob, note.id, 'pwned')).toBe(false)
     expect(saveNoteContent(db, bob, note.id, doc('pwned'), 2)).toEqual({ ok: false, reason: 'not_found' })
     expect(saveNoteContent(db, bob, note.id, doc('pwned'), 1)).toEqual({ ok: false, reason: 'not_found' })
@@ -255,6 +260,7 @@ describe('notes repo', () => {
   it('reports a missing note as not found', () => {
     const id = randomUUID()
     expect(getNote(db, alice, id)).toBeUndefined()
+    expect(getNoteSummary(db, alice, id)).toBeUndefined()
     expect(renameNote(db, alice, id, 'x')).toBe(false)
     expect(saveNoteContent(db, alice, id, doc('x'), 1)).toEqual({ ok: false, reason: 'not_found' })
     expect(deleteNote(db, alice, id)).toBe(false)

@@ -1,6 +1,6 @@
 // Shared fixtures for the auth tests: an app with a fake clock, a counting/blocking fake hasher,
 // and small request helpers.
-import type { FastifyInstance, LightMyRequestResponse } from 'fastify'
+import type { FastifyInstance, LightMyRequestResponse, RouteOptions } from 'fastify'
 import { buildApp } from '../../src/app.js'
 import { loadConfig, type Config } from '../../src/config.js'
 import { openDb, type Db } from '../../src/db/index.js'
@@ -84,7 +84,12 @@ export interface TestApp {
 }
 
 export async function makeApp(
-  opts: { env?: Record<string, string>; hashWaitMs?: number } = {},
+  opts: {
+    env?: Record<string, string>
+    hashWaitMs?: number
+    /** Called for every route registered (an `onRoute` hook installed before the app is ready). */
+    onRoute?: (route: RouteOptions) => void
+  } = {},
 ): Promise<TestApp> {
   const db = openDb(':memory:')
   const hasher = new FakeHasher()
@@ -92,6 +97,7 @@ export async function makeApp(
   const config = testConfig(opts.env)
   const hashLimiter = new HashLimiter({ maxWaitMs: opts.hashWaitMs ?? 2000 })
   const app = buildApp({ config, db, auth: { hasher, hashLimiter, now: clock.now } })
+  if (opts.onRoute) app.addHook('onRoute', opts.onRoute)
   await app.ready()
   return { app, db, hasher, clock, config }
 }

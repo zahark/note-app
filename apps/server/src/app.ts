@@ -4,6 +4,9 @@ import type { Db } from './db/index.js'
 import { errorBody, errorHandler } from './errors.js'
 import { registerSession } from './plugins/session.js'
 import { authRoutes } from './routes/auth.js'
+import { folderRoutes } from './routes/folders.js'
+import { noteRoutes } from './routes/notes.js'
+import { treeRoutes } from './routes/tree.js'
 import { AuthService } from './services/auth.js'
 import type { HashLimiter } from './services/hashLimiter.js'
 import type { PasswordHasher } from './services/password.js'
@@ -61,6 +64,10 @@ export function buildApp({ config, db, logger = false, auth = {} }: BuildAppOpti
 
   app.get('/api/health', async () => ({ status: 'ok' }))
   app.register(authRoutes)
+  // private, owner-scoped API: each plugin installs the auth guard on its own routes
+  app.register(treeRoutes)
+  app.register(folderRoutes)
+  app.register(noteRoutes)
 
   return app
 }

@@ -1,0 +1,192 @@
+// Cross-user isolation: every private endpoint, called by user B with user A's ids (in path params
+// and in body fields), answers 404 and changes nothing of A's. Each task that adds a private endpoint
+// appends a row to `ENDPOINTS`; the coverage test below fails until it does.
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { closeApp, errorCode, makeApp, type TestApp } from './helpers/auth.js'
+import { api, doc, loginAs, type Method, type TestUser } from './helpers/api.js'
+
+/** Resources created before every row runs: A's are the targets, B's let a row combine B's own path id with A's body id. */
+interface Ids {
+  aliceFolder: string
+  aliceNote: string
+  bobFolder: string
+  bobNote: string
+}
+
+interface Endpoint {
+  method: Method
+  /** The route pattern as registered (used by the coverage check). */
+  route: string
+  /** What the row calls; the name describes where A's id goes. */
+  name: string
+  url: (ids: Ids) => string
+  body?: (ids: Ids) => unknown
+}
+
+const ENDPOINTS: Endpoint[] = [
+  // folders (Task 7)
+  {
+    method: 'POST',
+    route: '/api/folders',
+    name: "body parent_folder_id = A's folder",
+    url: () => '/api/folders',
+    body: (i) => ({ name: 'x', parent_folder_id: i.aliceFolder }),
+  },
+  {
+    method: 'PATCH',
+    route: '/api/folders/:id',
+    name: "path = A's folder",
+    url: (i) => `/api/folders/${i.aliceFolder}`,
+    body: () => ({ name: 'pwned' }),
+  },
+  {
+    method: 'DELETE',
+    route: '/api/folders/:id',
+    name: "path = A's folder",
+    url: (i) => `/api/folders/${i.aliceFolder}`,
+  },
+  // notes (Task 7)
+  {
+    method: 'POST',
+    route: '/api/notes',
+    name: "body folder_id = A's folder",
+    url: () => '/api/notes',
+    body: (i) => ({ title: 'x', folder_id: i.aliceFolder }),
+  },
+  {
+    method: 'GET',
+    route: '/api/notes/:id',
+    name: "path = A's note",
+    url: (i) => `/api/notes/${i.aliceNote}`,
+  },
+  {
+    method: 'PATCH',
+    route: '/api/notes/:id',
+    name: "path = A's note",
+    url: (i) => `/api/notes/${i.aliceNote}`,
+    body: () => ({ title: 'pwned' }),
+  },
+  {
+    method: 'PUT',
+    route: '/api/notes/:id/content',
+    name: "path = A's note (at its current version)",
+    url: (i) => `/api/notes/${i.aliceNote}/content`,
+    body: () => ({ content: doc('pwned'), version: 2 }),
+  },
+  {
+    method: 'DELETE',
+    route: '/api/notes/:id',
+    name: "path = A's note",
+    url: (i) => `/api/notes/${i.aliceNote}`,
+  },
+]
+
+/** Private routes that take no id at all; each has its own scoping test below. */
+const ID_FREE_ROUTES = ['GET /api/tree']
+
+/** Public surfaces, outside the owner-scoped API. */
+const isPublic = (url: string) =>
+  url === '/api/health' || url.startsWith('/api/auth/') || url.startsWith('/api/shared/')
+
+let t: TestApp
+let alice: TestUser
+let bob: TestUser
+let ids: Ids
+const registered: string[] = []
+
+beforeAll(async () => {
+  t = await makeApp({
+    onRoute: (r) => {
+      const methods = Array.isArray(r.method) ? r.method : [r.method]
+      for (const m of methods) if (m !== 'HEAD') registered.push(`${m} ${r.url}`)
+    },
+  })
+  alice = await loginAs(t, 'alice@example.com')
+  bob = await loginAs(t, 'bob@example.com')
+})
+
+afterAll(async () => {
+  await closeApp(t)
+})
+
+async function create(user: TestUser, url: string, body: object, key: 'folder' | 'note'): Promise<string> {
+  const res = await api(t.app, user, 'POST', url, body)
+  expect(res.statusCode).toBe(201)
+  return res.json()[key].id
+}
+
+/** Fresh resources for each row, so a row that wrongly succeeded cannot hide behind an earlier one. */
+async function seed(): Promise<Ids> {
+  const aliceFolder = await create(alice, '/api/folders', { name: 'A folder' }, 'folder')
+  const aliceNote = await create(alice, '/api/notes', { folder_id: aliceFolder, title: 'A note' }, 'note')
+  const saved = await api(t.app, alice, 'PUT', `/api/notes/${aliceNote}/content`, {
+    content: doc('secret'),
+    version: 1,
+  })
+  expect(saved.statusCode).toBe(200)
+  return {
+    aliceFolder,
+    aliceNote,
+    bobFolder: await create(bob, '/api/folders', { name: 'B folder' }, 'folder'),
+    bobNote: await create(bob, '/api/notes', { title: 'B note' }, 'note'),
+  }
+}
+
+/** Everything of A's that an endpoint could touch. */
+function aliceState() {
+  return {
+    folders: t.db.prepare('SELECT * FROM folders WHERE user_id = ? ORDER BY id').all(alice.id),
+    notes: t.db.prepare('SELECT * FROM notes WHERE user_id = ? ORDER BY id').all(alice.id),
+  }
+}
+
+/** Rows owned by B, to check that a rejected body-id request inserted nothing for B either. */
+function bobRowCount(): number {
+  return t.db
+    .prepare('SELECT (SELECT COUNT(*) FROM folders WHERE user_id = ?) + (SELECT COUNT(*) FROM notes WHERE user_id = ?)')
+    .pluck()
+    .get(bob.id, bob.id) as number
+}
+
+describe('cross-user isolation', () => {
+  it('covers every private endpoint', async () => {
+    const covered = new Set([...ENDPOINTS.map((e) => `${e.method} ${e.route}`), ...ID_FREE_ROUTES])
+    const privateRoutes = registered.filter((r) => !isPublic(r.split(' ')[1]!))
+    expect(privateRoutes.length).toBeGreaterThan(0)
+    expect(privateRoutes.filter((r) => !covered.has(r))).toEqual([])
+    // and the table has no stale rows for routes that no longer exist
+    expect([...covered].filter((r) => !registered.includes(r))).toEqual([])
+  })
+
+  it.each(ENDPOINTS)("$method $route as user B ($name) → 404, A's data unchanged", async (e) => {
+    ids = await seed()
+    const before = aliceState()
+    const bobRows = bobRowCount()
+
+    const res = await api(t.app, bob, e.method, e.url(ids), e.body?.(ids))
+
+    expect(res.statusCode).toBe(404)
+    expect(errorCode(res)).toBe('NOT_FOUND')
+    expect(aliceState()).toEqual(before)
+    expect(bobRowCount()).toBe(bobRows)
+  })
+
+  it.each(ENDPOINTS)('$method $route without a session → 401', async (e) => {
+    ids = await seed()
+    const before = aliceState()
+    const res = await api(t.app, null, e.method, e.url(ids), e.body?.(ids))
+    expect(res.statusCode).toBe(401)
+    expect(aliceState()).toEqual(before)
+  })
+
+  it("GET /api/tree as user B never lists A's folders or notes", async () => {
+    ids = await seed()
+    const res = await api(t.app, bob, 'GET', '/api/tree')
+    expect(res.statusCode).toBe(200)
+    const { folders, notes } = res.json() as { folders: { user_id: string }[]; notes: { user_id: string }[] }
+    expect(folders.length).toBeGreaterThan(0)
+    expect(notes.length).toBeGreaterThan(0)
+    expect([...folders, ...notes].every((r) => r.user_id === bob.id)).toBe(true)
+    expect((await api(t.app, null, 'GET', '/api/tree')).statusCode).toBe(401)
+  })
+})

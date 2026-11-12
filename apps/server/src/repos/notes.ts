@@ -48,6 +48,13 @@ export function listNoteSummaries(db: Db, userId: string): NoteSummary[] {
     .all(userId) as NoteSummary[]
 }
 
+export function getNoteSummary(db: Db, userId: string, noteId: string): NoteSummary | undefined {
+  requireUserId(userId)
+  return db
+    .prepare(`SELECT ${SUMMARY_COLUMNS} FROM notes WHERE id = ? AND user_id = ?`)
+    .get(noteId, userId) as NoteSummary | undefined
+}
+
 export function getNote(db: Db, userId: string, noteId: string): Note | undefined {
   requireUserId(userId)
   const row = db
