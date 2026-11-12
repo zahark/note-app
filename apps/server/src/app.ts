@@ -8,6 +8,7 @@ import { authRoutes } from './routes/auth.js'
 import { folderRoutes } from './routes/folders.js'
 import { noteRoutes } from './routes/notes.js'
 import { shareRoutes } from './routes/share.js'
+import { sharedApiHeaders, sharedRoutes } from './routes/shared.js'
 import { treeRoutes } from './routes/tree.js'
 import { sweepAttachments } from './services/attachments.js'
 import { AuthService } from './services/auth.js'
@@ -77,6 +78,8 @@ export function buildApp({
   app.decorate('config', config)
   app.decorate('db', db)
   app.setErrorHandler(errorHandler)
+  // no-referrer / noindex / no-store on every public shared API response, errors and 404s included
+  app.addHook('onSend', sharedApiHeaders)
   app.setNotFoundHandler((_request, reply) =>
     reply.status(404).send(errorBody('NOT_FOUND', 'Not found')),
   )
@@ -95,6 +98,8 @@ export function buildApp({
   app.register(noteRoutes)
   app.register(attachmentRoutes)
   app.register(shareRoutes)
+  // public shared API: no session, a share token or signed link is the only credential
+  app.register(sharedRoutes)
 
   if (attachmentSweep) scheduleAttachmentSweep(app)
 
