@@ -3,6 +3,7 @@ import { ChevronRightIcon, FileTextIcon, FolderIcon, FolderOpenIcon } from 'luci
 import { cn } from 'cn'
 import type { TreeItem } from './buildTree'
 import { TreeItemContextMenu, TreeItemMenuButton } from './ContextMenu'
+import { useTreeRowDnd, type DropHighlight } from './dnd'
 
 /** Callbacks shared by every row of the tree. */
 export interface TreeHandlers {
@@ -29,6 +30,10 @@ export interface TreeNodeProps {
 
 const INDENT_PX = 12
 
+/** Drop-target styling during a drag: the hovered folder is highlighted, unreachable ones dimmed. */
+const dropHighlightClass = (highlight: DropHighlight) =>
+  cn(highlight === 'over' && 'bg-primary/15 ring-2 ring-primary/60', highlight === 'invalid' && 'opacity-40')
+
 /** Server limits: folder names 1–255 chars, note titles 0–500. */
 const MAX_LENGTH = { folder: 255, note: 500 } as const
 
@@ -39,6 +44,7 @@ export function TreeNode({ item, expanded, selectedId, renamingId, handlers }: T
   const isSelected = selectedId === item.id
   const isRenaming = renamingId === item.id
   const indent = { paddingLeft: item.depth * INDENT_PX + 4 }
+  const { setDragRef, dragAttributes, dragListeners, isDragging, setDropRef, highlight } = useTreeRowDnd(item, isRenaming)
   const actions = {
     onRename: () => handlers.onRename(item),
     onMove: () => handlers.onMove(item),
@@ -64,9 +70,14 @@ export function TreeNode({ item, expanded, selectedId, renamingId, handlers }: T
     >
       <TreeItemContextMenu {...actions}>
         <div
+          ref={setDropRef}
+          data-tree-row=""
+          data-drop-target={highlight}
           className={cn(
             'group/row flex h-7 items-center rounded-md pr-1 hover:bg-sidebar-accent',
             isSelected && 'bg-sidebar-accent font-medium text-sidebar-accent-foreground',
+            isDragging && 'opacity-50',
+            dropHighlightClass(highlight),
           )}
         >
           {isRenaming ? (
@@ -82,16 +93,23 @@ export function TreeNode({ item, expanded, selectedId, renamingId, handlers }: T
             </div>
           ) : (
             <button
+              ref={setDragRef}
+              {...dragAttributes}
+              {...dragListeners}
               type="button"
               className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
               style={indent}
               onClick={() => (isFolder ? handlers.onFolderClick(item.id) : handlers.onNoteClick(item.id))}
               onKeyDown={(event) => {
+                // Space picks the row up for a keyboard drag
+                dragListeners?.onKeyDown?.(event)
                 if (event.key === 'F2') {
                   event.preventDefault()
                   handlers.onRename(item)
                 }
               }}
+              // Space is the drag key, so it must not also click the row (Enter still does)
+              onKeyUp={(event) => event.key === ' ' && event.preventDefault()}
             >
               {icon}
               <span className="truncate">{item.name}</span>

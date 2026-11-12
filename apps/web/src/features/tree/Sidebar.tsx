@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { useCreateFolder, useCreateNote, useTree } from './api'
 import { buildTree, subtreeFolderIds, type TreeItem } from './buildTree'
 import { DeleteDialog } from './DeleteDialog'
+import { RootDropZone, TreeDnd } from './dnd'
 import { MoveDialog } from './MoveDialog'
 import { useDeleteFolder, useDeleteNote, useMoveFolder, useMoveNote, useRenameFolder, useRenameNote } from './mutations'
 import { TreeNode, type TreeHandlers } from './TreeNode'
@@ -17,7 +18,8 @@ export const NOTE_PARAM = 'note'
  * Sidebar: header with "New note" / "New folder" (created inside the selected folder, or the
  * selected note's folder), the collapsible folder tree, and persistent "new at root" buttons.
  * Each row has a right-click / "…" menu with inline rename, Move to… and delete (with confirm);
- * those changes are applied optimistically and rolled back if the server refuses them.
+ * those changes are applied optimistically and rolled back if the server refuses them. Rows can
+ * also be dragged onto a folder or the root zone (mouse or keyboard), which moves them the same way.
  */
 export function Sidebar() {
   const tree = useTree()
@@ -181,18 +183,21 @@ export function Sidebar() {
             </Button>
           </div>
         ) : (
-          <ul role="tree" aria-label="Folders and notes">
-            {items.map((item) => (
-              <TreeNode
-                key={item.id}
-                item={item}
-                expanded={expanded}
-                selectedId={selectedId}
-                renamingId={renamingId}
-                handlers={handlers}
-              />
-            ))}
-          </ul>
+          <TreeDnd tree={tree.data} onMove={move}>
+            <ul role="tree" aria-label="Folders and notes">
+              {items.map((item) => (
+                <TreeNode
+                  key={item.id}
+                  item={item}
+                  expanded={expanded}
+                  selectedId={selectedId}
+                  renamingId={renamingId}
+                  handlers={handlers}
+                />
+              ))}
+            </ul>
+            <RootDropZone />
+          </TreeDnd>
         )}
       </div>
 
