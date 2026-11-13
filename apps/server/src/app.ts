@@ -10,9 +10,10 @@ import Fastify, {
   type FastifyServerOptions,
 } from 'fastify'
 import type { Config, OffsiteBackupConfig, TrustProxy } from './config.js'
-import type { Db } from './db/index.js'
-import { errorBody, errorHandler, notFound } from './errors.js'
+import { DB_FILE_NAME, type Db } from './db/index.js'
+import { errorBody, errorHandler, errorMessage, notFound } from './errors.js'
 import { registerSession } from './plugins/session.js'
+import { holdsUserData } from './repos/publicShare.js'
 import { attachmentRoutes } from './routes/attachments.js'
 import { authRoutes } from './routes/auth.js'
 import { folderRoutes } from './routes/folders.js'
@@ -22,10 +23,10 @@ import { SHARED_API_URL, sharedApiHeaders, sharedApiHeaderValues, sharedRoutes }
 import { treeRoutes } from './routes/tree.js'
 import { sweepAttachments, type SweepResult } from './services/attachments.js'
 import { AuthService } from './services/auth.js'
+import { UPLOADS_ARCHIVE_NAME } from './services/backup.js'
 import { ipKey } from './services/ipKey.js'
 import type { HashLimiter } from './services/hashLimiter.js'
 import {
-  holdsUserData,
   isOffsiteBackupDue,
   offsiteBackupTarget,
   pruneOffsiteBackups,
@@ -33,6 +34,7 @@ import {
   runOffsiteBackup,
   sweepStaleOffsiteTempDirs,
   writeOffsiteState,
+  type OffsiteBackupResult,
 } from './services/offsiteBackup.js'
 import type { PasswordHasher } from './services/password.js'
 import type { Clock } from './services/rateLimiter.js'
@@ -121,7 +123,7 @@ declare module 'fastify' {
  * socket address, or X-Forwarded-For per TRUST_PROXY). The fallback is logged at debug level only: a
  * platform's own health checks reach the app without the header, so a warning would fire constantly.
  */
-export function clientIpOf(request: FastifyRequest, clientIpHeader: string | null): string {
+function clientIpOf(request: FastifyRequest, clientIpHeader: string | null): string {
   if (clientIpHeader === null) return request.ip
   const fromHeader = clientIpFromHeader(request, clientIpHeader)
   if (fromHeader !== null) return fromHeader
@@ -240,7 +242,7 @@ export function buildApp({
     scheduleOffsiteBackup(app, {
       dataDir: config.dataDir,
       cfg: config.offsiteBackup,
-      holdsUserData: () => holdsUserData(db),
+      hasUserData: () => holdsUserData(db),
     })
   }
 
@@ -345,14 +347,10 @@ export const OFFSITE_CHECK_INTERVAL_MS = HOUR_MS
 export interface OffsiteBackupSchedule {
   dataDir: string
   cfg: OffsiteBackupConfig
-  /** Whether the database holds anything worth backing up yet (`holdsUserData`). */
-  holdsUserData: () => boolean
+  /** Whether the database holds anything worth backing up yet (`holdsUserData` in repos/publicShare.ts). */
+  hasUserData: () => boolean
   /** Where runs make their temp directory and stale ones are swept (default `os.tmpdir()`; tests). */
   tmpRoot?: string
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 /** An error's message for the off-site backup log lines, with the bucket credentials blanked out. */
@@ -377,7 +375,7 @@ function redactedMessage(err: unknown, cfg: OffsiteBackupConfig): string {
  */
 export function scheduleOffsiteBackup(
   app: FastifyInstance,
-  { dataDir, cfg, holdsUserData: hasData, tmpRoot }: OffsiteBackupSchedule,
+  { dataDir, cfg, hasUserData, tmpRoot }: OffsiteBackupSchedule,
   run: typeof runOffsiteBackup = runOffsiteBackup,
   prune: typeof pruneOffsiteBackups = pruneOffsiteBackups,
 ): void {
@@ -391,41 +389,41 @@ export function scheduleOffsiteBackup(
   const check = async () => {
     const startedAt = Date.now()
     if (!isOffsiteBackupDue(readOffsiteState(dataDir), cfg.intervalMs, startedAt)) return
-    if (!hasData()) {
-      if (!skipLogged) app.log.info(target, 'offsite backup skipped: no notes, folders or attachments yet')
+    if (!hasUserData()) {
+      if (!skipLogged) app.log.info(target, 'off-site backup skipped: no notes, folders or attachments yet')
       skipLogged = true
       return
     }
-    let result: Awaited<ReturnType<typeof runOffsiteBackup>>
+    let result: OffsiteBackupResult
     try {
       result = await run(dataDir, cfg, { now: new Date(startedAt), signal, tmpRoot })
     } catch (err) {
-      if (signal.aborted) app.log.warn(target, 'offsite backup cancelled by shutdown')
-      else app.log.error({ ...target, error: redactedMessage(err, cfg) }, 'offsite backup failed')
+      if (signal.aborted) app.log.warn(target, 'off-site backup cancelled by shutdown')
+      else app.log.error({ ...target, error: redactedMessage(err, cfg) }, 'off-site backup failed')
       return
     }
     app.log.info(
       {
         ...target,
         name: result.name,
-        notesDbBytes: result.files['notes.db'].size,
-        uploadsArchiveBytes: result.files['uploads.tar.gz'].size,
+        notesDbBytes: result.files[DB_FILE_NAME].size,
+        uploadsArchiveBytes: result.files[UPLOADS_ARCHIVE_NAME].size,
         durationMs: Date.now() - startedAt,
       },
-      'offsite backup uploaded',
+      'off-site backup uploaded',
     )
     try {
       // the snapshot time, not the finish time, so the daily slot does not drift by the upload's duration
       writeOffsiteState(dataDir, { lastSuccessAt: new Date(startedAt).toISOString(), lastBackup: result.name })
     } catch (err) {
-      app.log.error({ error: redactedMessage(err, cfg) }, 'offsite backup state file not written')
+      app.log.error({ error: redactedMessage(err, cfg) }, 'off-site backup state file not written')
     }
     try {
       const deleted = await prune(cfg, new Date(), signal)
-      if (deleted.length > 0) app.log.info({ ...target, deleted }, 'old offsite backups pruned')
+      if (deleted.length > 0) app.log.info({ ...target, deleted }, 'old off-site backups pruned')
     } catch (err) {
-      if (signal.aborted) app.log.warn(target, 'offsite backup prune cancelled by shutdown')
-      else app.log.error({ ...target, error: redactedMessage(err, cfg) }, 'offsite backup prune failed')
+      if (signal.aborted) app.log.warn(target, 'off-site backup prune cancelled by shutdown')
+      else app.log.error({ ...target, error: redactedMessage(err, cfg) }, 'off-site backup prune failed')
     }
   }
 
@@ -434,7 +432,7 @@ export function scheduleOffsiteBackup(
     timer.unref()
     if (inFlight || signal.aborted) return
     inFlight = check()
-      .catch((err: unknown) => app.log.error({ error: redactedMessage(err, cfg) }, 'offsite backup check failed'))
+      .catch((err: unknown) => app.log.error({ error: redactedMessage(err, cfg) }, 'off-site backup check failed'))
       .finally(() => {
         inFlight = undefined
       })
@@ -442,7 +440,7 @@ export function scheduleOffsiteBackup(
 
   app.addHook('onReady', async () => {
     const swept = sweepStaleOffsiteTempDirs(tmpRoot)
-    if (swept.length > 0) app.log.info({ removed: swept }, 'removed temp directories of interrupted offsite backups')
+    if (swept.length > 0) app.log.info({ removed: swept }, 'removed temp directories of interrupted off-site backups')
     timer = setTimeout(tick, OFFSITE_FIRST_CHECK_MS)
     timer.unref()
   })

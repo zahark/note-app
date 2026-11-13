@@ -2,7 +2,8 @@
 // unscoped. It is read-only apart from the attachment sweep's deletes.
 //
 // Holds the attachment sweep's queries, the share-state lookup used by PIN unlock and link/token
-// verification, and the public shared-note and shared-attachment lookups.
+// verification, the public shared-note and shared-attachment lookups, and the off-site backup scheduler's
+// "anything to back up yet" check.
 import type { Db } from '../db/index.js'
 import type { ShareType } from './notes.js'
 
@@ -107,4 +108,20 @@ export function deleteSweepableAttachments(db: Db, cutoff: number): string[] {
  */
 export function listAllStorageNames(db: Db): Set<string> {
   return new Set(db.prepare('SELECT storage_name FROM attachments').pluck().all() as string[])
+}
+
+/**
+ * True when the database holds anything worth backing up: a note, a folder or an attachment. An account
+ * alone is not (a fresh installation right after sign-up, e.g. one about to restore a backup).
+ * Unscoped because it backs the off-site backup scheduler's empty-installation skip, and a backup covers
+ * every user's data. Read-only; it returns a single boolean and no row content.
+ */
+export function holdsUserData(db: Db): boolean {
+  const row = db
+    .prepare(
+      'SELECT EXISTS(SELECT 1 FROM notes) OR EXISTS(SELECT 1 FROM folders) OR EXISTS(SELECT 1 FROM attachments)',
+    )
+    .pluck()
+    .get()
+  return row === 1
 }

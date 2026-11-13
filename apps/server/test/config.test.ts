@@ -208,6 +208,11 @@ describe('loadConfig: CLIENT_IP_HEADER', () => {
     expect(() => loadConfig(env)).toThrow(/CLIENT_IP_HEADER and TRUST_PROXY/)
   })
 
+  it('reports the TRUST_PROXY conflict together with every other problem', () => {
+    const env = baseEnv({ CLIENT_IP_HEADER: 'Fly-Client-IP', TRUST_PROXY: '1', PORT: 'abc' })
+    expect(() => loadConfig(env)).toThrow(/PORT must be an integer[\s\S]*CLIENT_IP_HEADER and TRUST_PROXY cannot both be set/)
+  })
+
   it.each(['', '0'])('allows it with TRUST_PROXY=%j (trusts nothing)', (trust) => {
     const config = loadConfig(baseEnv({ CLIENT_IP_HEADER: 'Fly-Client-IP', TRUST_PROXY: trust }))
     expect(config.clientIpHeader).toBe('fly-client-ip')

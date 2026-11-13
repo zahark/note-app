@@ -5,8 +5,8 @@
 // successful upload (see `scheduleOffsiteBackup` in app.ts), always keeps the newest complete ones, and
 // leaves keys it does not recognise alone. The state file `DATA_DIR/offsite-backup.json` records the last
 // successful scheduled upload; only the scheduler writes it. The scheduler skips a database that holds no
-// notes, folders or attachments yet (`holdsUserData`), so a fresh installation never fills the bucket with
-// empty backups that would push real ones out of the always-kept newest 7.
+// notes, folders or attachments yet (`holdsUserData` in repos/publicShare.ts), so a fresh installation
+// never fills the bucket with empty backups that would push real ones out of the always-kept newest 7.
 //
 // Framework-free: the scheduler, its timers and its logging live in app.ts.
 import { createHash } from 'node:crypto'
@@ -15,18 +15,17 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
+import { z } from 'zod'
 import type { OffsiteBackupConfig } from '../config.js'
-import { DB_FILE_NAME, type Db } from '../db/index.js'
+import { DB_FILE_NAME } from '../db/index.js'
 import { DAY_MS, HOUR_MS } from '../units.js'
-import { runBackup, UPLOADS_ARCHIVE_NAME } from './backup.js'
+import { BACKUP_NAME_PATTERN, runBackup, UPLOADS_ARCHIVE_NAME } from './backup.js'
 import { deleteObject, listObjects, putObjectFromFile } from './s3.js'
 
 /** The object that marks a backup complete; uploaded last. */
 export const MANIFEST_NAME = 'manifest.json'
 /** State file in DATA_DIR recording the last successful scheduled upload. */
 export const OFFSITE_STATE_FILE = 'offsite-backup.json'
-/** Backup names as `runBackup` makes them; the only names ever used in (or pruned from) object keys. */
-export const BACKUP_NAME_PATTERN = /^notes-backup-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/
 /** Complete backups always kept, however old (uploads may have been failing for a while). */
 export const KEEP_NEWEST_BACKUPS = 7
 /** An incomplete backup (no manifest) older than this is a failed upload and is deleted. */
@@ -37,26 +36,31 @@ export const OFFSITE_TEMP_PREFIX = 'notes-offsite-'
 export const STALE_TEMP_DIR_AGE_MS = HOUR_MS
 
 const BACKUP_FILES = [UPLOADS_ARCHIVE_NAME, DB_FILE_NAME, MANIFEST_NAME] as const
-type BackupFileName = (typeof BACKUP_FILES)[number]
+/** The objects of one backup (backup names are `BACKUP_NAME_PATTERN`, the only ones used in object keys). */
+export type BackupFileName = (typeof BACKUP_FILES)[number]
 
-export interface FileDigest {
-  size: number
+const byteCount = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
+
+const fileDigestSchema = z.object({
+  size: byteCount,
   /** Lowercase hex SHA-256 of the file's bytes. */
-  sha256: string
-}
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+})
+export type FileDigest = z.infer<typeof fileDigestSchema>
 
-/** `manifest.json`, the last object of a backup. */
-export interface OffsiteManifest {
-  version: 1
-  name: string
+/** `manifest.json`, the last object of a backup; `restore:offsite` validates a downloaded one with it. */
+export const offsiteManifestSchema = z.object({
+  version: z.literal(1),
+  name: z.string(),
   /** ISO time of the snapshot. */
-  createdAt: string
-  files: { 'notes.db': FileDigest; 'uploads.tar.gz': FileDigest }
+  createdAt: z.string(),
+  files: z.object({ [DB_FILE_NAME]: fileDigestSchema, [UPLOADS_ARCHIVE_NAME]: fileDigestSchema }),
   /** Files in the tarball and the sum of their sizes (what a restore needs on disk for them). */
-  uploads: { count: number; bytes: number }
+  uploads: z.object({ count: byteCount, bytes: byteCount }),
   /** Storage names with an attachment row whose file was missing at backup time. */
-  missing: string[]
-}
+  missing: z.array(z.string()),
+})
+export type OffsiteManifest = z.infer<typeof offsiteManifestSchema>
 
 export interface OffsiteBackupResult {
   name: string
@@ -82,6 +86,14 @@ export function offsiteBackupTarget(cfg: OffsiteBackupConfig): { endpoint: strin
   return { endpoint: cfg.endpoint.host, bucket: cfg.bucket, prefix: cfg.prefix }
 }
 
+/** Whether `key` is a backup's `manifest.json`. */
+const isManifestKey = (key: string): boolean => key.endsWith(`/${MANIFEST_NAME}`)
+
+/** A backup's keys, manifest first: deleted in this order, no "complete" backup is ever left without data. */
+function manifestFirst(keys: string[]): string[] {
+  return [...keys.filter(isManifestKey), ...keys.filter((key) => !isManifestKey(key))]
+}
+
 async function digestFile(file: string): Promise<FileDigest> {
   const hash = createHash('sha256')
   let size = 0
@@ -92,20 +104,6 @@ async function digestFile(file: string): Promise<FileDigest> {
     }
   })
   return { size, sha256: hash.digest('hex') }
-}
-
-/**
- * True when the database holds anything worth backing up: a note, a folder or an attachment. An account
- * alone is not (a fresh installation right after sign-up, e.g. one about to restore a backup).
- */
-export function holdsUserData(db: Db): boolean {
-  const row = db
-    .prepare(
-      'SELECT EXISTS(SELECT 1 FROM notes) OR EXISTS(SELECT 1 FROM folders) OR EXISTS(SELECT 1 FROM attachments)',
-    )
-    .pluck()
-    .get()
-  return row === 1
 }
 
 /**
@@ -144,16 +142,16 @@ export function sweepStaleOffsiteTempDirs(tmpRoot: string = os.tmpdir(), nowMs: 
  * 404 counts as deleted.
  */
 async function deleteAttempted(cfg: OffsiteBackupConfig, keys: string[]): Promise<void> {
-  const manifest = keys.find((key) => key.endsWith(`/${MANIFEST_NAME}`))
-  if (manifest !== undefined) {
-    try {
-      await deleteObject(cfg, manifest)
-    } catch {
-      return
+  for (const key of manifestFirst(keys)) {
+    if (isManifestKey(key)) {
+      try {
+        await deleteObject(cfg, key)
+      } catch {
+        return
+      }
+    } else {
+      await deleteObject(cfg, key).catch(() => {})
     }
-  }
-  for (const key of keys) {
-    if (key !== manifest) await deleteObject(cfg, key).catch(() => {})
   }
 }
 
@@ -178,8 +176,8 @@ export async function runOffsiteBackup(
     const backup = await runBackup({ dataDir, outDir: tmp, now })
     const name = path.basename(backup.dir)
     const files: OffsiteManifest['files'] = {
-      'notes.db': await digestFile(backup.dbPath),
-      'uploads.tar.gz': await digestFile(backup.archivePath),
+      [DB_FILE_NAME]: await digestFile(backup.dbPath),
+      [UPLOADS_ARCHIVE_NAME]: await digestFile(backup.archivePath),
     }
     const manifest: OffsiteManifest = {
       version: 1,
@@ -274,9 +272,7 @@ export async function pruneOffsiteBackups(
 
   const deleted: string[] = []
   for (const backup of doomed.sort((a, b) => a.time.getTime() - b.time.getTime())) {
-    const isManifest = (key: string) => key.endsWith(`/${MANIFEST_NAME}`)
-    const keys = [...backup.keys.filter(isManifest), ...backup.keys.filter((key) => !isManifest(key))]
-    for (const key of keys) await deleteObject(cfg, key, signal)
+    for (const key of manifestFirst(backup.keys)) await deleteObject(cfg, key, signal)
     deleted.push(backup.name)
   }
   return deleted

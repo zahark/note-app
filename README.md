@@ -502,10 +502,10 @@ needs the same `SHARE_HMAC_KEY` for expiring share links to keep working).
   logged and retried at the next hourly check; what that run had already uploaded is deleted again
   (its `manifest.json` first, so a failed run never leaves a folder that looks complete).
 - While the app holds no notes, folders or attachments yet (a fresh install, e.g. one you are about to
-  restore into), no backup is made (`offsite backup skipped: no notes, folders or attachments yet`, logged
+  restore into), no backup is made (`off-site backup skipped: no notes, folders or attachments yet`, logged
   once): empty backups would push real ones out of the newest 7 that are always kept.
-- Log lines (`fly logs` on Fly): `offsite backup uploaded` (with the backup name and sizes),
-  `offsite backup failed` (with the error), `old offsite backups pruned` (with the deleted names).
+- Log lines (`fly logs` on Fly): `off-site backup uploaded` (with the backup name and sizes),
+  `off-site backup failed` (with the error), `old off-site backups pruned` (with the deleted names).
 - In the bucket (Cloudflare dashboard → R2 → your bucket), each backup is a folder
   `notes-backups/notes-backup-YYYYMMDD-HHMMSS/` (the time is UTC) holding `uploads.tar.gz`, `notes.db`
   and `manifest.json`. `manifest.json` is uploaded last: a folder without it is an unfinished upload and

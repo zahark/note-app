@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import fs, { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { main as restoreOffsiteMain } from '../src/cli/restoreOffsite.js'
+import { main as restoreOffsiteMain } from '../src/cli/restore-offsite.js'
 import { DB_FILE_NAME, openDataDb } from '../src/db/index.js'
 import { storeUpload } from '../src/services/attachments.js'
 import { runOffsiteBackup } from '../src/services/offsiteBackup.js'
@@ -18,7 +18,7 @@ import {
 } from '../src/services/restore.js'
 import { PNG, tmpDataDir } from './helpers/api.js'
 import { seedUser } from './helpers/auth.js'
-import { FAKE_S3_BUCKET, FakeS3 } from './helpers/fakeS3.js'
+import { FakeS3, offsiteEnv } from './helpers/fakeS3.js'
 
 const NAME = 'notes-backup-20261113-093015'
 const EMPTY_NAME = 'notes-backup-20261114-093015'
@@ -47,23 +47,13 @@ let logs: { level: 'info' | 'warn'; message: string }[]
 const restoreDir = () => path.join(dataDir, 'restore')
 const previousDir = () => path.join(dataDir, 'restore-previous')
 
-function cliEnv(dir: string): NodeJS.ProcessEnv {
-  return {
-    DATA_DIR: dir,
-    BACKUP_S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com',
-    BACKUP_S3_BUCKET: FAKE_S3_BUCKET,
-    BACKUP_S3_ACCESS_KEY_ID: 'AKIDFAKEKEY',
-    BACKUP_S3_SECRET_ACCESS_KEY: 'fake-secret-access-key-value',
-  }
-}
-
 /** Stages a backup into `dir` with the real CLI. */
 async function stageWithCli(dir: string, name: Stage): Promise<void> {
   const spy = vi.spyOn(console, 'log').mockImplementation(() => {})
   // the CLI refuses to run as root; these tests must pass whoever runs them
   const uid = vi.spyOn(process, 'getuid').mockReturnValue(1000)
   try {
-    await restoreOffsiteMain([name], { env: cliEnv(dir), endpoint: fake.endpoint })
+    await restoreOffsiteMain([name], { env: offsiteEnv(dir), endpoint: fake.endpoint })
   } finally {
     spy.mockRestore()
     uid.mockRestore()

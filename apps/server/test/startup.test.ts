@@ -8,7 +8,7 @@ import { Writable } from 'node:stream'
 import type { FastifyInstance } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OFFSITE_FIRST_CHECK_MS } from '../src/app.js'
-import { main as restoreOffsiteMain } from '../src/cli/restoreOffsite.js'
+import { main as restoreOffsiteMain } from '../src/cli/restore-offsite.js'
 import type { Config } from '../src/config.js'
 import { DB_FILE_NAME, openDataDb } from '../src/db/index.js'
 import { OFFSITE_STATE_FILE, readOffsiteState, runOffsiteBackup } from '../src/services/offsiteBackup.js'
@@ -16,7 +16,7 @@ import { RestoreError } from '../src/services/restore.js'
 import { prepareServer } from '../src/startup.js'
 import { tmpDataDir } from './helpers/api.js'
 import { seedUser, testConfig } from './helpers/auth.js'
-import { FAKE_S3_BUCKET, FakeS3 } from './helpers/fakeS3.js'
+import { FakeS3, offsiteEnv } from './helpers/fakeS3.js'
 
 const NAME = 'notes-backup-20261113-093015'
 
@@ -58,16 +58,7 @@ afterEach(async () => {
 async function stage(): Promise<void> {
   vi.spyOn(console, 'log').mockImplementation(() => {})
   vi.spyOn(process, 'getuid').mockReturnValue(1000)
-  await restoreOffsiteMain([NAME], {
-    env: {
-      DATA_DIR: dataDir,
-      BACKUP_S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com',
-      BACKUP_S3_BUCKET: FAKE_S3_BUCKET,
-      BACKUP_S3_ACCESS_KEY_ID: 'AKIDFAKEKEY',
-      BACKUP_S3_SECRET_ACCESS_KEY: 'fake-secret-access-key-value',
-    },
-    endpoint: fake.endpoint,
-  })
+  await restoreOffsiteMain([NAME], { env: offsiteEnv(dataDir), endpoint: fake.endpoint })
   vi.restoreAllMocks()
   expect(existsSync(path.join(dataDir, 'restore', 'READY'))).toBe(true)
 }

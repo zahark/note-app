@@ -9,13 +9,13 @@ import { gzipSync } from 'node:zlib'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CliError } from '../src/cli/common.js'
-import { main as restoreOffsiteMain } from '../src/cli/restoreOffsite.js'
+import { main as restoreOffsiteMain } from '../src/cli/restore-offsite.js'
 import { DB_FILE_NAME, openDataDb, type Db } from '../src/db/index.js'
 import { storeUpload, uploadsDir } from '../src/services/attachments.js'
 import { MANIFEST_NAME, runOffsiteBackup, type OffsiteManifest } from '../src/services/offsiteBackup.js'
 import { PNG, tmpDataDir } from './helpers/api.js'
 import { seedUser } from './helpers/auth.js'
-import { FAKE_S3_BUCKET, FakeS3 } from './helpers/fakeS3.js'
+import { FakeS3, offsiteEnv } from './helpers/fakeS3.js'
 
 const NOW = new Date('2026-11-13T09:30:15.000Z')
 const NAME = 'notes-backup-20261113-093015'
@@ -39,17 +39,7 @@ const lockFile = () => path.join(dataDir, 'restore-staging.lock')
 /** A pid no process has (above every platform's pid limit). */
 const DEAD_PID = 2 ** 30
 
-function restoreEnv(): NodeJS.ProcessEnv {
-  return {
-    DATA_DIR: dataDir,
-    BACKUP_S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com',
-    BACKUP_S3_BUCKET: FAKE_S3_BUCKET,
-    BACKUP_S3_ACCESS_KEY_ID: 'AKIDFAKEKEY',
-    BACKUP_S3_SECRET_ACCESS_KEY: 'fake-secret-access-key-value',
-  }
-}
-
-const run = (args: string[]) => restoreOffsiteMain(args, { env: restoreEnv(), endpoint: fake.endpoint })
+const run = (args: string[]) => restoreOffsiteMain(args, { env: offsiteEnv(dataDir), endpoint: fake.endpoint })
 
 /** Runs the CLI and returns its CliError (fails the test when it succeeds or throws anything else). */
 async function runFailing(args: string[]): Promise<CliError> {

@@ -9,6 +9,9 @@ import {
   parseOffsiteBackupConfig,
   type OffsiteBackupConfig,
 } from '../config.js'
+import { errorMessage } from '../errors.js'
+import { BackupError } from '../services/backup.js'
+import { S3Error } from '../services/s3.js'
 
 /** DATA_DIR as the server resolves it (the CLIs read only this variable, never `.env`). */
 export function cliDataDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -66,6 +69,21 @@ export function cliOffsiteConfig({ env = process.env, endpoint }: OffsiteCliOpti
     throw new CliError(`Off-site backups are not configured: set ${OFFSITE_BACKUP_REQUIRED.join(', ')}`)
   }
   return endpoint === undefined ? cfg : { ...cfg, endpoint }
+}
+
+/**
+ * An expected failure of an off-site CLI run as a `CliError` (no stack trace): a `BackupError` (no
+ * database, a corrupt archive), an `S3Error` from the bucket, or a system error (a refused or reset
+ * connection, a full disk), with the message `<context>: <its message>`. A `CliError` and anything else
+ * (a bug) are returned unchanged.
+ */
+export function toCliError(err: unknown, context: string): unknown {
+  if (err instanceof CliError) return err
+  const systemError = typeof (err as NodeJS.ErrnoException | null)?.code === 'string'
+  if (err instanceof BackupError || err instanceof S3Error || systemError) {
+    return new CliError(`${context}: ${errorMessage(err)}`)
+  }
+  return err
 }
 
 /**

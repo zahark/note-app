@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import Database from 'better-sqlite3'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { main as backupMain } from '../src/cli/backup.js'
 import { CliError } from '../src/cli/common.js'
 import { DB_FILE_NAME, openDataDb, type Db } from '../src/db/index.js'
@@ -119,15 +119,10 @@ describe('runBackup', () => {
 })
 
 describe('backup CLI', () => {
-  afterEach(() => {
-    vi.unstubAllEnvs()
-  })
-
   it('reports a BackupError as a CliError with the same message', async () => {
     const empty = tmpDataDir()
     try {
-      vi.stubEnv('DATA_DIR', empty)
-      const err = await backupMain([]).catch((e: unknown) => e)
+      const err = await backupMain([], { env: { DATA_DIR: empty } }).catch((e: unknown) => e)
       expect(err).toBeInstanceOf(CliError)
       expect((err as Error).message).toBe(`No database at ${path.join(empty, DB_FILE_NAME)} (check DATA_DIR)`)
     } finally {
@@ -138,8 +133,7 @@ describe('backup CLI', () => {
   it('refuses extra arguments with its usage line', async () => {
     const empty = tmpDataDir()
     try {
-      vi.stubEnv('DATA_DIR', empty)
-      const err = await backupMain(['a', 'b']).catch((e: unknown) => e)
+      const err = await backupMain(['a', 'b'], { env: { DATA_DIR: empty } }).catch((e: unknown) => e)
       expect(err).toBeInstanceOf(CliError)
       expect((err as Error).message).toMatch(/^Usage: npm run backup/)
       expect(readdirSync(empty)).toEqual([])

@@ -135,8 +135,8 @@ installed before ready, used by the isolation coverage check) and `hashWaitMs`.
   `(db, userId, ...)`, calls `requireUserId(userId)` first (`repos/scope.ts`) and filters every query
   by `user_id`. `test/repos.test.ts` enumerates these modules' exports, so a new function is covered
   automatically and must follow the rule.
-- `repos/publicShare.ts` is the **only** module allowed to query without a `userId` (public shared API
-  and the attachment sweep). It is read-only apart from the sweep's deletes, and every function there
+- `repos/publicShare.ts` is the **only** module allowed to query without a `userId` (public shared API,
+  the attachment sweep, and the off-site backup scheduler's `holdsUserData` empty-install check). It is read-only apart from the sweep's deletes, and every function there
   documents why it is unscoped. Do not add unscoped queries anywhere else.
 - `users.ts`, `sessions.ts`, `knownDevices.ts` are auth lookups (by email/token hash, before an
   identity exists) and are outside the rule.
@@ -277,10 +277,15 @@ See the README "Docker", "Deploying to Fly.io", "Off-site backups" and "Restore 
   `pruneOffsiteBackups` runs only after a successful scheduled upload: deletes complete backups older
   than `keepDays` but always keeps the newest 7, deletes incomplete ones older than a day, ages from the
   backup name, ignores unknown keys, returns the deleted names. The scheduler skips a database without
-  notes, folders or attachments (`holdsUserData`: a fresh install must not push real backups out of the
+  notes, folders or attachments (`holdsUserData` in `repos/publicShare.ts`: a fresh install must not push real backups out of the
   newest 7), sweeps stale `notes-offsite-*` temp dirs at start, and redacts the key id/secret from logged
   error messages. Only the scheduler writes `DATA_DIR/offsite-backup.json` (`lastSuccessAt` = snapshot
-  time); the `backup:offsite` CLI never writes it and never prunes.
+  time); the `backup:offsite` CLI never writes it and never prunes. The manifest's shape is
+  `offsiteManifestSchema` (the restore validates against the same schema); backup names are
+  `BACKUP_NAME_PATTERN` in `services/backup.ts`. Log lines spell it "off-site" everywhere.
+- CLI files are kebab-case after their npm script (`cli/backup-offsite.ts`, `cli/restore-offsite.ts`);
+  each `main(args, { env, ... })` takes its environment as an option (tests pass `offsiteEnv()` from
+  `test/helpers/fakeS3.ts`), and the off-site CLIs map expected failures with `toCliError`.
 - Restore is two-phase, all inside `DATA_DIR` (layout names in `services/restore.ts`):
   `restore:offsite <name>` (app running; holds `restore-staging.lock` with its pid, a dead holder's lock
   is taken over) verifies manifest, free space (+10%), sizes, SHA-256 and `integrity_check` into

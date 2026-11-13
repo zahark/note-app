@@ -12,11 +12,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildApp, OFFSITE_CHECK_INTERVAL_MS, OFFSITE_FIRST_CHECK_MS, scheduleOffsiteBackup } from '../src/app.js'
 import type { OffsiteBackupConfig } from '../src/config.js'
 import { DB_FILE_NAME, openDataDb, type Db } from '../src/db/index.js'
+import { holdsUserData } from '../src/repos/publicShare.js'
 import { storeUpload, uploadsDir } from '../src/services/attachments.js'
 import { BackupError, readUploadsArchive } from '../src/services/backup.js'
 import {
   backupNameTime,
-  holdsUserData,
   isOffsiteBackupDue,
   MANIFEST_NAME,
   OFFSITE_STATE_FILE,
@@ -512,7 +512,7 @@ describe('scheduleOffsiteBackup', () => {
       },
     })
     app = Fastify({ logger: { level: 'info', stream } })
-    scheduleOffsiteBackup(app, { dataDir, cfg, holdsUserData: () => hasData, tmpRoot }, run, prune)
+    scheduleOffsiteBackup(app, { dataDir, cfg, hasUserData: () => hasData, tmpRoot }, run, prune)
     return app
   }
 
@@ -556,7 +556,7 @@ describe('scheduleOffsiteBackup', () => {
     expect(prune).toHaveBeenCalledTimes(1)
     expect(prune.mock.calls[0]![0]).toBe(cfg)
     expect(prune.mock.invocationCallOrder[0]!).toBeGreaterThan(run.mock.invocationCallOrder[0]!)
-    expect(messages()).toEqual(['offsite backup uploaded', 'old offsite backups pruned'])
+    expect(messages()).toEqual(['off-site backup uploaded', 'old off-site backups pruned'])
     expect(logs[0]).toMatchObject({ name: NAME, bucket: cfg.bucket, endpoint: 'acct.r2.example.com', notesDbBytes: 10 })
   })
 
@@ -571,7 +571,7 @@ describe('scheduleOffsiteBackup', () => {
     expect(run).not.toHaveBeenCalled()
     expect(prune).not.toHaveBeenCalled()
     expect(existsSync(stateFile())).toBe(false)
-    expect(messages()).toEqual(['offsite backup skipped: no notes, folders or attachments yet'])
+    expect(messages()).toEqual(['off-site backup skipped: no notes, folders or attachments yet'])
 
     hasData = true
     await vi.advanceTimersByTimeAsync(OFFSITE_CHECK_INTERVAL_MS)
@@ -587,7 +587,7 @@ describe('scheduleOffsiteBackup', () => {
     makeApp(vi.fn<RunFn>(async () => okResult()))
     await app.ready()
     expect(existsSync(stale)).toBe(false)
-    expect(logs.find((l) => l.msg === 'removed temp directories of interrupted offsite backups')).toMatchObject({
+    expect(logs.find((l) => l.msg === 'removed temp directories of interrupted off-site backups')).toMatchObject({
       removed: ['notes-offsite-killed'],
     })
   })
@@ -602,7 +602,7 @@ describe('scheduleOffsiteBackup', () => {
     await vi.advanceTimersByTimeAsync(OFFSITE_FIRST_CHECK_MS)
     expect(run).toHaveBeenCalledTimes(1)
     expect(prune).toHaveBeenCalledTimes(1)
-    expect(messages()).toEqual(['offsite backup uploaded', 'offsite backup state file not written'])
+    expect(messages()).toEqual(['off-site backup uploaded', 'off-site backup state file not written'])
     expect(logs[1]).toMatchObject({ level: 50 })
 
     // without a readable state the next hourly check finds a backup due again
@@ -666,7 +666,7 @@ describe('scheduleOffsiteBackup', () => {
     expect(run).toHaveBeenCalledTimes(1)
     expect(existsSync(stateFile())).toBe(false)
     expect(prune).not.toHaveBeenCalled()
-    expect(logs.find((l) => l.msg === 'offsite backup failed')).toMatchObject({
+    expect(logs.find((l) => l.msg === 'off-site backup failed')).toMatchObject({
       error: 'S3 AccessDenied (HTTP 403): Access Denied',
       bucket: cfg.bucket,
     })
@@ -687,7 +687,7 @@ describe('scheduleOffsiteBackup', () => {
     await vi.advanceTimersByTimeAsync(OFFSITE_FIRST_CHECK_MS)
 
     expect(readOffsiteState(dataDir)?.lastBackup).toBe(NAME)
-    expect(messages()).toEqual(['offsite backup uploaded', 'offsite backup prune failed'])
+    expect(messages()).toEqual(['off-site backup uploaded', 'off-site backup prune failed'])
   })
 
   it('never runs two at once', async () => {
@@ -734,8 +734,8 @@ describe('scheduleOffsiteBackup', () => {
     await app.close()
 
     expect(signal?.aborted).toBe(true)
-    expect(messages()).toContain('offsite backup cancelled by shutdown')
-    expect(messages()).not.toContain('offsite backup failed')
+    expect(messages()).toContain('off-site backup cancelled by shutdown')
+    expect(messages()).not.toContain('off-site backup failed')
     expect(existsSync(stateFile())).toBe(false)
     expect(prune).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(3 * DAY_MS)
@@ -760,9 +760,9 @@ describe('scheduleOffsiteBackup', () => {
 
     expect(pruneSignal?.aborted).toBe(true)
     expect(readOffsiteState(dataDir)?.lastBackup).toBe(NAME)
-    const cancelled = logs.find((l) => l.msg === 'offsite backup prune cancelled by shutdown')
+    const cancelled = logs.find((l) => l.msg === 'off-site backup prune cancelled by shutdown')
     expect(cancelled).toMatchObject({ level: 40, bucket: cfg.bucket })
-    expect(messages()).not.toContain('offsite backup prune failed')
+    expect(messages()).not.toContain('off-site backup prune failed')
   })
 
   it('never runs when closed before the first check', async () => {
@@ -794,7 +794,7 @@ describe('scheduleOffsiteBackup', () => {
     makeApp(run, prune)
     await app.ready()
     await vi.advanceTimersByTimeAsync(OFFSITE_FIRST_CHECK_MS + OFFSITE_CHECK_INTERVAL_MS)
-    expect(messages()).toEqual(['offsite backup failed', 'offsite backup uploaded', 'offsite backup prune failed'])
+    expect(messages()).toEqual(['off-site backup failed', 'off-site backup uploaded', 'off-site backup prune failed'])
     const text = JSON.stringify(logs)
     expect(text).not.toContain(cfg.secretAccessKey)
     expect(text).not.toContain(cfg.accessKeyId)

@@ -24,6 +24,24 @@ export interface FakeS3Object {
 export type FakeS3Interceptor = (req: FakeS3Request, res: ServerResponse) => boolean
 
 export const FAKE_S3_BUCKET = 'test-bucket'
+export const FAKE_S3_ACCESS_KEY_ID = 'AKIDFAKEKEY'
+export const FAKE_S3_SECRET_ACCESS_KEY = 'fake-secret-access-key-value'
+
+/**
+ * An operator's environment for the off-site CLIs: DATA_DIR and the BACKUP_* settings only (no server
+ * secrets). The endpoint is an https R2-like one, as config requires; the CLIs' `endpoint` option sends the
+ * requests to a `FakeS3` instead.
+ */
+export function offsiteEnv(dataDir: string, overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
+  return {
+    DATA_DIR: dataDir,
+    BACKUP_S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com',
+    BACKUP_S3_BUCKET: FAKE_S3_BUCKET,
+    BACKUP_S3_ACCESS_KEY_ID: FAKE_S3_ACCESS_KEY_ID,
+    BACKUP_S3_SECRET_ACCESS_KEY: FAKE_S3_SECRET_ACCESS_KEY,
+    ...overrides,
+  }
+}
 
 const escapeXml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -64,8 +82,8 @@ export class FakeS3 {
     return {
       endpoint: this.endpoint,
       bucket: FAKE_S3_BUCKET,
-      accessKeyId: 'AKIDFAKEKEY',
-      secretAccessKey: 'fake-secret-access-key-value',
+      accessKeyId: FAKE_S3_ACCESS_KEY_ID,
+      secretAccessKey: FAKE_S3_SECRET_ACCESS_KEY,
       region: 'auto',
       prefix: 'notes-backups/',
       intervalMs: 24 * 60 * 60 * 1000,

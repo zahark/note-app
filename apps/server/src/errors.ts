@@ -43,6 +43,11 @@ export const unsupportedMediaType = (message: string) =>
 export const serviceUnavailable = (message = 'Server busy, try again shortly') =>
   new AppError(503, 'BUSY', message)
 
+/** The message of anything thrown: an `Error`'s message, or the thrown value as a string. */
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
 export function errorBody(code: string, message: string): ErrorBody {
   return { error: { code, message } }
 }

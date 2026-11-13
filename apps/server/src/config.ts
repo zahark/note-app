@@ -341,6 +341,34 @@ function missingBackupProblems(env: NodeJS.ProcessEnv): string[] {
   return [`off-site backups need all of ${OFFSITE_BACKUP_REQUIRED.join(', ')}; missing: ${missing.join(', ')}`]
 }
 
+/**
+ * CLIENT_IP_HEADER together with a TRUST_PROXY that trusts anything: both name a source of the client
+ * address, and trusting two would let either one be forged. Checked on the two values alone, so it is
+ * reported together with every other problem (an invalid value of either is reported by the schema).
+ */
+function clientIpSourceProblems(env: NodeJS.ProcessEnv): string[] {
+  const header = clientIpHeader.safeParse(env.CLIENT_IP_HEADER)
+  const proxy = trustProxy.safeParse(env.TRUST_PROXY)
+  if (!header.success || !proxy.success || header.data === null || proxy.data === false) return []
+  return [
+    'CLIENT_IP_HEADER and TRUST_PROXY cannot both be set: use CLIENT_IP_HEADER when the platform proxy ' +
+      'sets that header on every request (e.g. Fly.io), TRUST_PROXY otherwise',
+  ]
+}
+
+/**
+ * Parses `env` with `schema`; throws one ConfigError listing every schema problem, the "all four or none"
+ * BACKUP_* rule and the `rawProblems` checked on the raw env.
+ */
+function parseOrThrow<T extends z.ZodType>(schema: T, env: NodeJS.ProcessEnv, rawProblems: string[] = []): z.output<T> {
+  const result = schema.safeParse(env)
+  const problems = [...missingBackupProblems(env), ...rawProblems]
+  if (!result.success || problems.length > 0) {
+    throw configError([...(result.success ? [] : issueMessages(result.error)), ...problems])
+  }
+  return result.data
+}
+
 function offsiteBackupFrom(e: z.output<typeof offsiteBackupEnvSchema>): OffsiteBackupConfig | null {
   const endpoint = e.BACKUP_S3_ENDPOINT
   const bucket = e.BACKUP_S3_BUCKET
@@ -368,12 +396,7 @@ function offsiteBackupFrom(e: z.output<typeof offsiteBackupEnvSchema>): OffsiteB
  * CLIs use it directly, so they run without the server's secrets.
  */
 export function parseOffsiteBackupConfig(env: NodeJS.ProcessEnv = process.env): OffsiteBackupConfig | null {
-  const result = offsiteBackupEnvSchema.safeParse(env)
-  const missing = missingBackupProblems(env)
-  if (!result.success || missing.length > 0) {
-    throw configError([...(result.success ? [] : issueMessages(result.error)), ...missing])
-  }
-  return offsiteBackupFrom(result.data)
+  return offsiteBackupFrom(parseOrThrow(offsiteBackupEnvSchema, env))
 }
 
 /**
@@ -381,19 +404,7 @@ export function parseOffsiteBackupConfig(env: NodeJS.ProcessEnv = process.env): 
  * Throws ConfigError listing every problem, so the server refuses to boot on bad config.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const result = envSchema.safeParse(env)
-  const missing = missingBackupProblems(env)
-  if (!result.success || missing.length > 0) {
-    throw configError([...(result.success ? [] : issueMessages(result.error)), ...missing])
-  }
-  const e = result.data
-  // both name a source of the client address; trusting two would let either one be forged
-  if (e.CLIENT_IP_HEADER !== null && e.TRUST_PROXY !== false) {
-    throw configError([
-      'CLIENT_IP_HEADER and TRUST_PROXY cannot both be set: use CLIENT_IP_HEADER when the platform proxy ' +
-        'sets that header on every request (e.g. Fly.io), TRUST_PROXY otherwise',
-    ])
-  }
+  const e = parseOrThrow(envSchema, env, clientIpSourceProblems(env))
   return {
     sessionSecret: e.SESSION_SECRET,
     shareHmacKey: e.SHARE_HMAC_KEY,

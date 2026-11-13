@@ -8,6 +8,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
 import { DB_FILE_NAME } from '../db/index.js'
+import { errorMessage } from '../errors.js'
 
 /** A complete, verified stage waiting for the next start. */
 export const RESTORE_DIR = 'restore'
@@ -22,6 +23,8 @@ export const RESTORE_LOCK_FILE = 'restore-staging.lock'
 export const RESTORE_PREVIOUS_DIR = 'restore-previous'
 /** Written last into the stage: its presence means "every staged file is verified and on disk". */
 export const RESTORE_READY_FILE = 'READY'
+/** The staged uploads directory inside the stage (it replaces `DATA_DIR/uploads`). */
+export const RESTORE_UPLOADS_DIR = 'uploads'
 
 /** The JSON content of `READY`. */
 export interface RestoreReady {
@@ -39,9 +42,8 @@ const readySchema = z.object({
   uploadsCount: z.number().int().min(0),
 })
 
-const UPLOADS = 'uploads'
 /** The staged items, in swap order. */
-const SWAP_ITEMS = [DB_FILE_NAME, UPLOADS] as const
+const SWAP_ITEMS = [DB_FILE_NAME, RESTORE_UPLOADS_DIR] as const
 /** The database's WAL and shared-memory files: they belong to the old database and move aside with it. */
 const DB_SIDE_FILES = [`${DB_FILE_NAME}-wal`, `${DB_FILE_NAME}-shm`] as const
 
@@ -81,7 +83,10 @@ export type RestoreOutcome = 'none' | 'cleaned' | 'restored' | 'discarded'
 
 /** Applying or discarding a staged restore failed; the message says what to do (it stops startup). */
 export class RestoreError extends Error {
-  override name = 'RestoreError'
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'RestoreError'
+  }
 }
 
 /** Whether anything (file, directory or even a dangling symlink) is at `p`. */
@@ -130,7 +135,7 @@ function readReady(file: string): RestoreReady {
   try {
     json = JSON.parse(fs.readFileSync(file, 'utf8'))
   } catch (err) {
-    throw new Error(`${file} is not readable JSON: ${(err as Error).message}`, { cause: err })
+    throw new Error(`${file} is not readable JSON: ${errorMessage(err)}`, { cause: err })
   }
   const parsed = readySchema.safeParse(json)
   if (!parsed.success) throw new Error(`${file} is not a valid restore marker`)
@@ -152,96 +157,140 @@ export function applyStagedRestore(dataDir: string, options: ApplyRestoreOptions
         `check ${path.join(dataDir, RESTORE_DIR)} and ${path.join(dataDir, RESTORE_PREVIOUS_DIR)} by hand.`
       : 'The database was not opened. To cancel the restore and keep the previous data, start the app once ' +
         'with RESTORE_ABORT=1 (on Fly.io: fly secrets set RESTORE_ABORT=1, then fly secrets unset RESTORE_ABORT).'
-    throw new RestoreError(`Applying the staged restore failed: ${(err as Error).message}\n${hint}`, { cause: err })
+    throw new RestoreError(`Applying the staged restore failed: ${errorMessage(err)}\n${hint}`, { cause: err })
   }
 }
 
-function apply(dataDir: string, { abort, log, afterStep }: ApplyRestoreOptions): RestoreOutcome {
+/** The paths of one apply: the stage, the kept previous data, and an item's live / staged / kept location. */
+interface RestorePaths {
+  dataDir: string
+  staged: string
+  previous: string
+  readyFile: string
+  live: (name: string) => string
+  inStage: (name: string) => string
+  kept: (name: string) => string
+}
+
+function restorePaths(dataDir: string): RestorePaths {
   const staged = path.join(dataDir, RESTORE_DIR)
   const previous = path.join(dataDir, RESTORE_PREVIOUS_DIR)
-  const readyFile = path.join(staged, RESTORE_READY_FILE)
-  const step = (what: string) => afterStep?.(what)
-  const live = (name: string) => path.join(dataDir, name)
-  const inStage = (name: string) => path.join(staged, name)
-  const kept = (name: string) => path.join(previous, name)
-
-  if (!present(readyFile)) {
-    // no restore armed: `restore/` without READY is a swap whose cleanup was interrupted (READY goes only
-    // once every item is in place, and a rollback removes `restore-previous/` before READY), so
-    // `restore-previous/` without READY is superseded data, and `restore-staging/` is what an interrupted
-    // `restore:offsite` left (unless one is running right now). The live data is complete either way, so a
-    // leftover that cannot be deleted (owned by another user, an I/O error) is only a warning: it must not
-    // keep the app from starting. `restore:offsite` deletes `restore-previous/` and `restore-staging/`
-    // itself before staging, and refuses while `restore/` exists, so a kept leftover never mixes into a swap.
-    const staging = path.join(dataDir, RESTORE_STAGING_DIR)
-    const leftovers = [staged, previous]
-    if (liveRestoreLockHolder(dataDir) === null) leftovers.push(staging)
-    const removed: string[] = []
-    for (const dir of leftovers) {
-      try {
-        if (!present(dir)) continue
-        fs.rmSync(dir, { recursive: true, force: true })
-        fsyncPath(dataDir)
-      } catch (err) {
-        log.warn(
-          `restore: could not remove ${dir}, left by an earlier restore (${(err as Error).message}); ` +
-            'the live data is not affected. Delete it by hand.',
-        )
-        continue
-      }
-      step(`removed ${path.basename(dir)}/`)
-      removed.push(`${path.basename(dir)}/`)
-    }
-    if (removed.length > 0) log.info(`restore: removed the leftovers of an earlier restore (${removed.join(', ')})`)
-    if (abort) {
-      log.warn('RESTORE_ABORT is set but no restore is staged; unset it (on Fly.io: fly secrets unset RESTORE_ABORT)')
-    }
-    return removed.length > 0 ? 'cleaned' : 'none'
+  return {
+    dataDir,
+    staged,
+    previous,
+    readyFile: path.join(staged, RESTORE_READY_FILE),
+    live: (name) => path.join(dataDir, name),
+    inStage: (name) => path.join(staged, name),
+    kept: (name) => path.join(previous, name),
   }
+}
 
-  if (abort) {
-    let name = '(unknown backup)'
+type Step = (what: string) => void
+
+function apply(dataDir: string, { abort, log, afterStep }: ApplyRestoreOptions): RestoreOutcome {
+  const paths = restorePaths(dataDir)
+  const step: Step = (what) => afterStep?.(what)
+  if (!present(paths.readyFile)) return removeLeftovers(paths, abort, log, step)
+  if (abort) return discardStage(paths, log, step)
+  return swapIn(paths, log, step)
+}
+
+/**
+ * No restore armed: `restore/` without READY is a swap whose cleanup was interrupted (READY goes only once
+ * every item is in place, and a rollback removes `restore-previous/` before READY), so `restore-previous/`
+ * without READY is superseded data, and `restore-staging/` is what an interrupted `restore:offsite` left
+ * (unless one is running right now). The live data is complete either way, so a leftover that cannot be
+ * deleted (owned by another user, an I/O error) is only a warning: it must not keep the app from starting.
+ * `restore:offsite` deletes `restore-previous/` and `restore-staging/` itself before staging, and refuses
+ * while `restore/` exists, so a kept leftover never mixes into a swap.
+ */
+function removeLeftovers(
+  { dataDir, staged, previous }: RestorePaths,
+  abort: boolean,
+  log: RestoreLog,
+  step: Step,
+): RestoreOutcome {
+  const staging = path.join(dataDir, RESTORE_STAGING_DIR)
+  const leftovers = [staged, previous]
+  if (liveRestoreLockHolder(dataDir) === null) leftovers.push(staging)
+  const removed: string[] = []
+  for (const dir of leftovers) {
     try {
-      name = readReady(readyFile).name
-    } catch {
-      // the marker's content does not matter for discarding
-    }
-    const rollBack = present(previous)
-    if (rollBack) {
-      // a swap is in progress: put the restored items back into the stage, the kept ones back in place
-      for (const item of [UPLOADS, DB_FILE_NAME]) {
-        // a swap only starts with both items staged, so a missing staged item is the one now live
-        if (!present(inStage(item)) && present(live(item))) {
-          move(live(item), inStage(item))
-          step(`moved ${item} back into ${RESTORE_DIR}/`)
-        }
-        if (present(kept(item)) && !present(live(item))) {
-          move(kept(item), live(item))
-          step(`moved ${item} back from ${RESTORE_PREVIOUS_DIR}/`)
-        }
-      }
-      for (const side of DB_SIDE_FILES) {
-        if (present(kept(side)) && !present(live(side))) {
-          move(kept(side), live(side))
-          step(`moved ${side} back from ${RESTORE_PREVIOUS_DIR}/`)
-        }
-      }
-      fs.rmdirSync(previous) // fails when anything is left, rather than deleting old data
+      if (!present(dir)) continue
+      fs.rmSync(dir, { recursive: true, force: true })
       fsyncPath(dataDir)
-      step(`removed ${RESTORE_PREVIOUS_DIR}/`)
+    } catch (err) {
+      log.warn(
+        `restore: could not remove ${dir}, left by an earlier restore (${errorMessage(err)}); ` +
+          'the live data is not affected. Delete it by hand.',
+      )
+      continue
     }
-    fs.rmSync(readyFile)
-    fsyncPath(staged)
-    step(`removed ${RESTORE_DIR}/${RESTORE_READY_FILE}`)
-    removeDir(staged, step)
-    log.warn(
-      `RESTORE_ABORT: discarded the staged restore of ${name}` +
-        (rollBack ? ' after rolling back the swap in progress' : '') +
-        '; the previous data stays live. Unset RESTORE_ABORT (on Fly.io: fly secrets unset RESTORE_ABORT)',
-    )
-    return 'discarded'
+    step(`removed ${path.basename(dir)}/`)
+    removed.push(`${path.basename(dir)}/`)
   }
+  if (removed.length > 0) log.info(`restore: removed the leftovers of an earlier restore (${removed.join(', ')})`)
+  if (abort) {
+    log.warn('RESTORE_ABORT is set but no restore is staged; unset it (on Fly.io: fly secrets unset RESTORE_ABORT)')
+  }
+  return removed.length > 0 ? 'cleaned' : 'none'
+}
 
+/** `RESTORE_ABORT` with a restore armed: rolls back a swap in progress, then deletes the stage. */
+function discardStage(
+  { dataDir, staged, previous, readyFile, live, inStage, kept }: RestorePaths,
+  log: RestoreLog,
+  step: Step,
+): RestoreOutcome {
+  let name = '(unknown backup)'
+  try {
+    name = readReady(readyFile).name
+  } catch {
+    // the marker's content does not matter for discarding
+  }
+  const rollBack = present(previous)
+  if (rollBack) {
+    // a swap is in progress: put the restored items back into the stage, the kept ones back in place
+    for (const item of [RESTORE_UPLOADS_DIR, DB_FILE_NAME]) {
+      // a swap only starts with both items staged, so a missing staged item is the one now live
+      if (!present(inStage(item)) && present(live(item))) {
+        move(live(item), inStage(item))
+        step(`moved ${item} back into ${RESTORE_DIR}/`)
+      }
+      if (present(kept(item)) && !present(live(item))) {
+        move(kept(item), live(item))
+        step(`moved ${item} back from ${RESTORE_PREVIOUS_DIR}/`)
+      }
+    }
+    for (const side of DB_SIDE_FILES) {
+      if (present(kept(side)) && !present(live(side))) {
+        move(kept(side), live(side))
+        step(`moved ${side} back from ${RESTORE_PREVIOUS_DIR}/`)
+      }
+    }
+    fs.rmdirSync(previous) // fails when anything is left, rather than deleting old data
+    fsyncPath(dataDir)
+    step(`removed ${RESTORE_PREVIOUS_DIR}/`)
+  }
+  fs.rmSync(readyFile)
+  fsyncPath(staged)
+  step(`removed ${RESTORE_DIR}/${RESTORE_READY_FILE}`)
+  removeDir(staged, step)
+  log.warn(
+    `RESTORE_ABORT: discarded the staged restore of ${name}` +
+      (rollBack ? ' after rolling back the swap in progress' : '') +
+      '; the previous data stays live. Unset RESTORE_ABORT (on Fly.io: fly secrets unset RESTORE_ABORT)',
+  )
+  return 'discarded'
+}
+
+/** A restore armed: moves the live items aside and the staged ones into place, then removes both directories. */
+function swapIn(
+  { dataDir, staged, previous, readyFile, live, inStage, kept }: RestorePaths,
+  log: RestoreLog,
+  step: Step,
+): RestoreOutcome {
   const ready = readReady(readyFile)
   if (!present(previous)) {
     // the swap has not started: it only starts on a complete stage
@@ -250,8 +299,8 @@ function apply(dataDir: string, { abort, log, afterStep }: ApplyRestoreOptions):
     if (db.size !== ready.notesDbSize) {
       throw new Error(`${inStage(DB_FILE_NAME)} is ${db.size} bytes, ${RESTORE_READY_FILE} says ${ready.notesDbSize}`)
     }
-    if (!fs.statSync(inStage(UPLOADS), { throwIfNoEntry: false })?.isDirectory()) {
-      throw new Error(`${inStage(UPLOADS)} is not a directory`)
+    if (!fs.statSync(inStage(RESTORE_UPLOADS_DIR), { throwIfNoEntry: false })?.isDirectory()) {
+      throw new Error(`${inStage(RESTORE_UPLOADS_DIR)} is not a directory`)
     }
     fs.mkdirSync(previous)
     fsyncPath(dataDir)

@@ -52,6 +52,11 @@ export interface BackupResult {
   missing: string[]
 }
 
+/** Every backup directory (and off-site backup) is named `<BACKUP_NAME_PREFIX><stamp>`. */
+const BACKUP_NAME_PREFIX = 'notes-backup-'
+/** A backup name as `runBackup` makes it; the groups are the UTC year, month, day, hour, minute, second. */
+export const BACKUP_NAME_PATTERN = new RegExp(`^${BACKUP_NAME_PREFIX}(\\d{4})(\\d{2})(\\d{2})-(\\d{2})(\\d{2})(\\d{2})$`)
+
 /** `2026-11-12T08:05:09.123Z` → `20261112-080509`. */
 function stamp(date: Date): string {
   return date.toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')
@@ -263,10 +268,9 @@ async function readTar(reader: ChunkReader, onEntry: ArchiveEntryHandler): Promi
       }
     }
     await onEntry(entry, content())
-    while (remaining > 0) {
-      const chunk = await reader.take(remaining)
-      if (chunk === null) throw truncated()
-      remaining -= chunk.length
+    // skip what onEntry left unread: a fresh generator continues from `remaining`
+    for await (const _unread of content()) {
+      // discarded
     }
     const pad = (BLOCK - (entry.size % BLOCK)) % BLOCK
     if (pad > 0 && (await reader.read(pad)) === null) throw truncated()
@@ -320,7 +324,7 @@ export async function runBackup({ dataDir, outDir, now = new Date() }: BackupOpt
   if (!existsSync(sourcePath)) throw new BackupError(`No database at ${sourcePath} (check DATA_DIR)`)
 
   const parent = path.resolve(outDir ?? path.join(dataDir, 'backups'))
-  const name = `notes-backup-${stamp(now)}`
+  const name = `${BACKUP_NAME_PREFIX}${stamp(now)}`
   const dir = path.join(parent, name)
   if (existsSync(dir)) throw new BackupError(`${dir} already exists`)
   const work = path.join(parent, `.${name}.partial`)

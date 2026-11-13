@@ -12,14 +12,15 @@ import path from 'node:path'
 import { pipeline as pipelineCallback, Transform, type Readable, type TransformCallback } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import Database from 'better-sqlite3'
-import { z } from 'zod'
 import type { OffsiteBackupConfig } from '../config.js'
 import { DB_FILE_NAME } from '../db/index.js'
-import { BackupError, readUploadsArchive, UPLOADS_ARCHIVE_NAME } from '../services/backup.js'
+import { errorMessage } from '../errors.js'
+import { readUploadsArchive, UPLOADS_ARCHIVE_NAME } from '../services/backup.js'
 import {
   backupKey,
   backupNameTime,
   MANIFEST_NAME,
+  offsiteManifestSchema,
   type FileDigest,
   type OffsiteManifest,
 } from '../services/offsiteBackup.js'
@@ -31,9 +32,10 @@ import {
   RESTORE_PREVIOUS_DIR,
   RESTORE_READY_FILE,
   RESTORE_STAGING_DIR,
+  RESTORE_UPLOADS_DIR,
   type RestoreReady,
 } from '../services/restore.js'
-import { getObjectStream, S3Error } from '../services/s3.js'
+import { getObjectStream } from '../services/s3.js'
 import { KIB, MIB } from '../units.js'
 import {
   CliError,
@@ -41,6 +43,7 @@ import {
   cliOffsiteConfig,
   refuseRoot,
   runIfInvokedDirectly,
+  toCliError,
   type OffsiteCliOptions,
 } from './common.js'
 
@@ -50,22 +53,7 @@ const MAX_MANIFEST_BYTES = 64 * KIB
 /** Free space required on top of the restored files. */
 const SPACE_MARGIN = 0.1
 
-const digestSchema = z.object({
-  size: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-  sha256: z.string().regex(/^[0-9a-f]{64}$/),
-})
-const manifestSchema = z.object({
-  version: z.literal(1),
-  name: z.string(),
-  createdAt: z.string(),
-  files: z.object({ [DB_FILE_NAME]: digestSchema, [UPLOADS_ARCHIVE_NAME]: digestSchema }),
-  uploads: z.object({
-    count: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-  }),
-  missing: z.array(z.string()),
-})
-
+/** The downloaded data files of a backup (the manifest is read on its own). */
 type BackupFile = typeof DB_FILE_NAME | typeof UPLOADS_ARCHIVE_NAME
 
 const formatMib = (bytes: number) => `${(bytes / MIB).toFixed(1)} MiB`
@@ -90,7 +78,7 @@ async function fetchManifest(cfg: OffsiteBackupConfig, name: string): Promise<Of
   } catch {
     throw new CliError(`${MANIFEST_NAME} of ${name} is not valid JSON`)
   }
-  const parsed = manifestSchema.safeParse(json)
+  const parsed = offsiteManifestSchema.safeParse(json)
   if (!parsed.success) {
     const problems = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')
     throw new CliError(`${MANIFEST_NAME} of ${name} is not a valid backup manifest: ${problems}`)
@@ -150,7 +138,7 @@ async function openDownload(
 
 /** Downloads and verifies `notes.db` into the stage. */
 async function stageDatabase(cfg: OffsiteBackupConfig, manifest: OffsiteManifest, dest: string): Promise<void> {
-  const { body, verifier } = await openDownload(cfg, manifest.name, DB_FILE_NAME, manifest.files['notes.db'])
+  const { body, verifier } = await openDownload(cfg, manifest.name, DB_FILE_NAME, manifest.files[DB_FILE_NAME])
   await pipeline(body, verifier, createWriteStream(dest, { flags: 'wx' }))
   verifier.check()
 
@@ -163,7 +151,7 @@ async function stageDatabase(cfg: OffsiteBackupConfig, manifest: OffsiteManifest
       db.close()
     }
   } catch (err) {
-    throw new CliError(`${DB_FILE_NAME} of ${manifest.name} is not a usable database: ${(err as Error).message}`)
+    throw new CliError(`${DB_FILE_NAME} of ${manifest.name} is not a usable database: ${errorMessage(err)}`)
   }
   if (check !== 'ok') {
     throw new CliError(`${DB_FILE_NAME} of ${manifest.name} failed its integrity check: ${String(check)}`)
@@ -174,7 +162,7 @@ async function stageDatabase(cfg: OffsiteBackupConfig, manifest: OffsiteManifest
 /** Streams `uploads.tar.gz` through the verifier and the tar reader into `<uploads>/<storage name>`. */
 async function stageUploads(cfg: OffsiteBackupConfig, manifest: OffsiteManifest, uploads: string): Promise<void> {
   await fsp.mkdir(uploads)
-  const { body, verifier } = await openDownload(cfg, manifest.name, UPLOADS_ARCHIVE_NAME, manifest.files['uploads.tar.gz'])
+  const { body, verifier } = await openDownload(cfg, manifest.name, UPLOADS_ARCHIVE_NAME, manifest.files[UPLOADS_ARCHIVE_NAME])
   // an error of either stream destroys both, and the reader rethrows it
   const source = pipelineCallback(body, verifier, () => {})
   const written: string[] = []
@@ -207,7 +195,7 @@ async function stageUploads(cfg: OffsiteBackupConfig, manifest: OffsiteManifest,
 async function checkFreeSpace(dataDir: string, manifest: OffsiteManifest): Promise<void> {
   const { bavail, bsize } = await fsp.statfs(dataDir)
   const free = bavail * bsize
-  const need = Math.ceil((manifest.files['notes.db'].size + manifest.uploads.bytes) * (1 + SPACE_MARGIN))
+  const need = Math.ceil((manifest.files[DB_FILE_NAME].size + manifest.uploads.bytes) * (1 + SPACE_MARGIN))
   if (free < need) {
     throw new CliError(
       `Not enough free space in ${dataDir}: restoring ${manifest.name} needs ${formatMib(need)} ` +
@@ -226,11 +214,11 @@ async function stage(cfg: OffsiteBackupConfig, dataDir: string, name: string): P
   await fsp.mkdir(staging)
   const dbPath = path.join(staging, DB_FILE_NAME)
   await stageDatabase(cfg, manifest, dbPath)
-  const uploads = path.join(staging, 'uploads')
+  const uploads = path.join(staging, RESTORE_UPLOADS_DIR)
   await stageUploads(cfg, manifest, uploads)
   fsyncPath(staging)
 
-  const ready: RestoreReady = { name, notesDbSize: manifest.files['notes.db'].size, uploadsCount: manifest.uploads.count }
+  const ready: RestoreReady = { name, notesDbSize: manifest.files[DB_FILE_NAME].size, uploadsCount: manifest.uploads.count }
   const readyPath = path.join(staging, RESTORE_READY_FILE)
   fs.writeFileSync(readyPath, `${JSON.stringify(ready)}\n`, { flag: 'wx' })
   fsyncPath(readyPath)
@@ -293,14 +281,7 @@ export async function main(args: string[], options: OffsiteCliOptions = {}): Pro
     manifest = await stage(cfg, dataDir, name)
   } catch (err) {
     await fsp.rm(staging, { recursive: true, force: true })
-    if (err instanceof CliError) throw err
-    if (err instanceof BackupError) throw new CliError(`${name}: ${err.message}`)
-    if (err instanceof S3Error) throw new CliError(`${name}: download failed: ${err.message}`)
-    // a connection reset mid-download, a full disk, ...: system errors are expected too
-    if (typeof (err as NodeJS.ErrnoException).code === 'string') {
-      throw new CliError(`${name}: staging failed: ${(err as Error).message}`)
-    }
-    throw err
+    throw toCliError(err, `${name}: staging failed`)
   } finally {
     unlock()
   }
@@ -310,7 +291,7 @@ export async function main(args: string[], options: OffsiteCliOptions = {}): Pro
   }
   console.log(
     `Backup ${name} is verified and staged in ${restoreDir} ` +
-      `(${DB_FILE_NAME} ${manifest.files['notes.db'].size} bytes, ${manifest.uploads.count} attachment files).\n` +
+      `(${DB_FILE_NAME} ${manifest.files[DB_FILE_NAME].size} bytes, ${manifest.uploads.count} attachment files).\n` +
       'Restart the app to apply it (on Fly.io: fly machine restart <machine-id>; fly machine list shows the id). ' +
       'To discard it instead, start the app once with RESTORE_ABORT=1.',
   )

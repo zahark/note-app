@@ -4,14 +4,14 @@
 import { existsSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { main as backupOffsiteMain } from '../src/cli/backupOffsite.js'
+import { main as backupOffsiteMain } from '../src/cli/backup-offsite.js'
 import { CliError } from '../src/cli/common.js'
 import { DB_FILE_NAME, openDataDb } from '../src/db/index.js'
 import { storeUpload } from '../src/services/attachments.js'
 import { MANIFEST_NAME, OFFSITE_STATE_FILE } from '../src/services/offsiteBackup.js'
 import { PNG, tmpDataDir } from './helpers/api.js'
 import { seedUser } from './helpers/auth.js'
-import { FAKE_S3_BUCKET, FakeS3 } from './helpers/fakeS3.js'
+import { FakeS3, offsiteEnv } from './helpers/fakeS3.js'
 
 const NOW = new Date('2026-11-13T09:30:15.000Z')
 const NAME = 'notes-backup-20261113-093015'
@@ -23,15 +23,12 @@ let log: string[]
 
 /** The operator's environment: DATA_DIR and BACKUP_* only (no SESSION_SECRET, SHARE_HMAC_KEY, PUBLIC_ORIGIN). */
 function backupEnv(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
-  return {
-    DATA_DIR: dataDir,
-    BACKUP_S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com',
-    BACKUP_S3_BUCKET: FAKE_S3_BUCKET,
+  return offsiteEnv(dataDir, {
     BACKUP_S3_ACCESS_KEY_ID: 'AKIDCLIKEY',
     BACKUP_S3_SECRET_ACCESS_KEY: SECRET,
     BACKUP_S3_PREFIX: 'custom',
     ...overrides,
-  }
+  })
 }
 
 beforeEach(async () => {
@@ -122,6 +119,14 @@ describe('backup:offsite CLI', () => {
     expect((err as Error).message).toContain('AccessDenied')
     expect((err as Error).message).not.toContain(SECRET)
     expect(existsSync(path.join(dataDir, OFFSITE_STATE_FILE))).toBe(false)
+  })
+
+  it('reports an unreachable endpoint as a CliError, like restore:offsite does', async () => {
+    const endpoint = fake.endpoint
+    await fake.stop()
+    const err = await backupOffsiteMain([], { env: backupEnv(), endpoint, now: NOW }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(CliError)
+    expect((err as Error).message).toMatch(/^Off-site backup failed: .*ECONNREFUSED/)
   })
 
   it('reports a missing database as a CliError', async () => {
