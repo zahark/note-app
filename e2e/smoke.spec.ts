@@ -4,9 +4,10 @@ import { gpxTrack, solidPdf } from './files'
 import { solidPng } from './png'
 
 /**
- * Smoke path through the production build: sign up, organize, write with images, share by PIN and
- * read the share in a fresh browser, then check that images survive reloads, renames and the
- * deletion of the note they were first pasted into. A PDF (in-note viewer) and a GPX (download chip)
+ * Smoke path through the production build: sign up, organize, write with a link (popup, Open,
+ * Cmd/Ctrl+click) and images, share by PIN and read the share (and open its link) in a fresh browser,
+ * then check that images survive reloads, renames and the deletion of the note they were first
+ * pasted into. A PDF (in-note viewer) and a GPX (download chip)
  * go along the same owner and shared paths, with no Content-Security-Policy violation on the way.
  */
 
@@ -125,6 +126,16 @@ async function expectGpxDownload(page: Page, scope: Locator) {
   expect(await readFile((await download.path())!)).toEqual(GPX.buffer)
 }
 
+/** Runs `action` and checks that it opens `url` in a new tab of the page's context (then closes that tab). */
+async function expectOpensTab(page: Page, url: string, action: () => Promise<void>) {
+  const opened = page.context().waitForEvent('page')
+  await action()
+  const tab = await opened
+  await tab.waitForLoadState()
+  expect(tab.url()).toBe(url)
+  await tab.close()
+}
+
 /** Creates a note at the root, names it, and leaves the cursor in its content. Returns its id. */
 async function createRootNote(page: Page, title: string): Promise<string> {
   const create = page.waitForResponse(isPath(/^\/api\/notes$/, 'POST'))
@@ -166,6 +177,8 @@ test('notes smoke path: organize, write, upload images and files, share by PIN, 
   let pinLink = ''
   let pin = ''
   const cspViolations = await watchCsp(page)
+  // a link target on the test server itself, so opening it needs no outside network
+  const linkUrl = new URL('/api/health', test.info().project.use.baseURL).toString()
 
   await test.step('sign up', async () => {
     await page.goto('/')
@@ -188,6 +201,28 @@ test('notes smoke path: organize, write, upload images and files, share by PIN, 
 
     noteAId = await createRootNote(page, 'Note A')
     await expectSaved(page, () => page.keyboard.type('Hello from note A.'))
+  })
+
+  await test.step('link in note A: a click shows the link popup, Open and Cmd/Ctrl+click open a new tab', async () => {
+    await page.keyboard.press('Enter')
+    // typing a URL and a space makes it a link
+    await expectSaved(page, () => page.keyboard.type(`Status: ${linkUrl} `))
+    const link = noteContent(page).getByRole('link', { name: linkUrl })
+    await expect(link).toHaveAttribute('href', linkUrl)
+
+    await link.click()
+    const popup = page.getByRole('group', { name: 'Link actions' })
+    await expect(popup).toBeVisible()
+    await expect(popup.getByText(linkUrl, { exact: true })).toBeVisible()
+    await expect(noteContent(page)).toBeFocused()
+    await expectOpensTab(page, linkUrl, () => popup.getByRole('button', { name: 'Open' }).click())
+    await expectOpensTab(page, linkUrl, () => link.click({ modifiers: ['ControlOrMeta'] }))
+
+    // leaving the link hides the popup; the cursor goes back to the end of the first line
+    await noteContent(page).getByText('Hello from note A.').click()
+    await page.keyboard.press('End')
+    await expect(popup).toBeHidden()
+    expect(cspViolations).toEqual([])
   })
 
   await test.step('drag note A into the folder', async () => {
@@ -266,6 +301,9 @@ test('notes smoke path: organize, write, upload images and files, share by PIN, 
       await expect(shared.getByText('Shared note · read-only')).toBeVisible()
       const content = shared.getByLabel('Shared note content')
       await expect(content).toContainText('Hello from note A.')
+      // a plain click on a link opens it in a new tab; visitors get no link popup
+      await expectOpensTab(shared, linkUrl, () => content.getByRole('link', { name: linkUrl }).click())
+      await expect(shared.getByRole('group', { name: 'Link actions' })).toHaveCount(0)
       // read-only, and none of the owner app: no sidebar tree, toolbar or title field
       await expect(content).toHaveAttribute('contenteditable', 'false')
       await expect(shared.getByRole('tree')).toHaveCount(0)

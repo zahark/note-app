@@ -67,6 +67,13 @@ installed before ready, used by the isolation coverage check) and `hashWaitMs`.
   fetching, so a reopened note never loads pre-save content (which would 409 on the next autosave).
   `useAutosave({noteId, version})` returns `{status, schedule, error}`; signing out awaits
   `flushAllSaves()` before calling `/api/auth/logout`.
+- Links: StarterKit's link keeps `openOnClick: false` (a click edits). The owner's `LinkPopover`
+  (TipTap `BubbleMenu` from `@tiptap/react/menus`, `shouldShowLinkPopover`) offers Open/Edit/Remove;
+  its helpers and the `LinkShortcuts` extension (Cmd/Ctrl+click opens, Escape dismisses) live in
+  `features/editor/links.ts`. Every open goes through `openLink` (`window.open(…, '_blank',
+  'noopener,noreferrer')`, only `http:`/`https:`/`mailto:` via `openableUrl`); the toolbar's Link button
+  and the popover's Edit share `applyLinkHref` (bare host → `https://`, empty → unlink). The read-only
+  shared view has no popover: a plain click follows the anchor's own `target="_blank"`.
 - Images in the editor are only ever `attachment://<aid>`: the parse rule drops any other `<img>`, and
   the node view never loads a non-attachment src. The reference helpers (`attachmentSrc`,
   `parseAttachmentSrc`, `elementAttachmentId`, `AttachmentResolver`) live in

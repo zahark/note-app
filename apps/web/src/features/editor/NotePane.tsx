@@ -21,6 +21,7 @@ import {
 import { attachmentSrc } from './attachmentRef'
 import { ConflictPrompt } from './ConflictPrompt'
 import { editorExtensions, toEditorContent } from './extensions'
+import { LinkPopover } from './LinkPopover'
 import { SaveIndicator } from './SaveIndicator'
 import { TitleField } from './TitleField'
 import { Toolbar } from './Toolbar'
@@ -214,6 +215,7 @@ function NoteEditor({ note, onReload }: NoteEditorProps) {
             <ShareButton note={note} />
           </div>
           <EditorContent editor={editor} className="mt-2" />
+          <LinkPopover editor={editor} />
         </div>
       </div>
     </div>

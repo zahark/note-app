@@ -297,6 +297,46 @@ function captureDownloads() {
 }
 
 const pdfBytes = { body: '%PDF-1.7', headers: { 'content-type': 'application/pdf' } }
+describe('shared links', () => {
+  it('a plain click follows the link to a new tab (no owner link popover, nothing intercepted)', async () => {
+    const href = 'https://example.com/docs'
+    const content = doc({
+      type: 'paragraph',
+      content: [
+        { type: 'text', text: 'See ' },
+        { type: 'text', text: 'docs', marks: [{ type: 'link', attrs: { href } }] },
+      ],
+    })
+    mockFetch({ [signedNotePath]: sharedNote(content) })
+    const open = vi.fn(() => null)
+    vi.stubGlobal('open', open)
+    renderApp(`/shared/${NOTE_ID}?exp=${EXP}&sig=${SIG}`)
+
+    const link = await screen.findByRole('link', { name: 'docs' })
+    expect(link).toHaveAttribute('href', href)
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link.getAttribute('rel')).toMatch(/\bnoopener\b.*\bnoreferrer\b/)
+
+    // the browser's default action (open the link's target="_blank") must not be prevented;
+    // the listener below records that, then stops jsdom from attempting the navigation
+    let defaultPrevented: boolean | null = null
+    const record = (event: MouseEvent) => {
+      defaultPrevented = event.defaultPrevented
+      event.preventDefault()
+    }
+    document.addEventListener('click', record)
+    try {
+      await userEvent.click(link)
+    } finally {
+      document.removeEventListener('click', record)
+    }
+    expect(defaultPrevented).toBe(false)
+    expect(open).not.toHaveBeenCalled()
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(screen.queryByRole('group', { name: 'Link actions' })).not.toBeInTheDocument()
+  })
+})
+
 /** A GPX response as the server sends it: typed, and named by `Content-Disposition`. */
 const namedGpx = (name: string): MockResponse => ({
   body: '<gpx/>',

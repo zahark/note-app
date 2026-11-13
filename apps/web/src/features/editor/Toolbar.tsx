@@ -13,6 +13,8 @@ import {
   ListOrderedIcon,
   ListTodoIcon,
   PaperclipIcon,
+  PilcrowLeftIcon,
+  PilcrowRightIcon,
   QuoteIcon,
   Redo2Icon,
   SquareCodeIcon,
@@ -21,6 +23,8 @@ import {
 } from 'lucide-react'
 import { cn } from 'cn'
 import { Button } from '@/components/ui/button'
+import { applyLinkHref } from './links'
+import { forcedTextDirection, toggleTextDirection } from './textDirection'
 
 interface ToolbarProps {
   editor: Editor
@@ -66,10 +70,7 @@ const Separator = () => <div aria-hidden className="mx-1 h-5 w-px bg-border" />
 function editLink(editor: Editor) {
   const previous = (editor.getAttributes('link').href as string | undefined) ?? ''
   const href = window.prompt('Link URL', previous)
-  if (href === null) return
-  const chain = editor.chain().focus().extendMarkRange('link')
-  if (href.trim() === '') chain.unsetLink().run()
-  else chain.setLink({ href: href.trim() }).run()
+  if (href !== null) applyLinkHref(editor, href)
 }
 
 /** Formatting toolbar for the note editor. */
@@ -90,6 +91,7 @@ export function Toolbar({ editor, onInsertImage, onAttachFile, uploading }: Tool
       blockquote: e.isActive('blockquote'),
       codeBlock: e.isActive('codeBlock'),
       link: e.isActive('link'),
+      direction: forcedTextDirection(e),
       canUndo: e.can().undo(),
       canRedo: e.can().redo(),
     }),
@@ -160,6 +162,19 @@ export function Toolbar({ editor, onInsertImage, onAttachFile, uploading }: Tool
         icon={SquareCodeIcon}
         active={state.codeBlock}
         onClick={() => run().toggleCodeBlock().run()}
+      />
+      <Separator />
+      <ToolbarButton
+        label="Right-to-left"
+        icon={PilcrowLeftIcon}
+        active={state.direction === 'rtl'}
+        onClick={() => toggleTextDirection(editor, 'rtl')}
+      />
+      <ToolbarButton
+        label="Left-to-right"
+        icon={PilcrowRightIcon}
+        active={state.direction === 'ltr'}
+        onClick={() => toggleTextDirection(editor, 'ltr')}
       />
       <Separator />
       <ToolbarButton label="Insert image" icon={ImagePlusIcon} disabled={uploading} onClick={onInsertImage} />
