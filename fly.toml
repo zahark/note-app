@@ -15,7 +15,7 @@
 #   (and the BACKUP_S3_* settings for off-site backups).
 
 # set by `fly launch --copy-config --name <your-app> --no-deploy`
-app = "notes-app-CHANGE-ME"
+app = "ivory-tide-7363"
 # the Fly region closest to you (`fly platform regions`); `fly launch` can change it
 primary_region = "fra"
 
