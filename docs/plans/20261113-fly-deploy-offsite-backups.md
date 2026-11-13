@@ -561,7 +561,7 @@
       1000-owned files, and the off-site CLIs report the missing `BACKUP_S3_*` settings by name
 
 ### Task 11: [Final] Update documentation
-- [ ] README: a "Deploying to Fly.io" section: install `flyctl`; `fly launch --copy-config --no-deploy
+- [x] README: a "Deploying to Fly.io" section: install `flyctl`; `fly launch --copy-config --no-deploy
       --name <app>`; `fly volumes create notes_data --size 1 --region <region>`; `fly secrets set
       SESSION_SECRET=… SHARE_HMAC_KEY=… PUBLIC_ORIGIN=https://<app>.fly.dev`; `fly deploy`; **sign up
       right away** (first user becomes the only account); keep only the shared IPv4 (no paid dedicated
@@ -572,21 +572,25 @@
       `**Fly.io**` bullet in the Docker section (README ~lines 210-212, "set `TRUST_PROXY=1`") to say
       `CLIENT_IP_HEADER=Fly-Client-IP` and never set `TRUST_PROXY` on Fly (the two together are a
       config error)
-- [ ] README: "Off-site backups to Cloudflare R2": create the bucket, an R2 API token with Object Read &
+- [x] README: "Off-site backups to Cloudflare R2": create the bucket, an R2 API token with Object Read &
       Write on that bucket only, the endpoint URL, `fly secrets set BACKUP_S3_…`, **no bucket lifecycle
       rule** (the app prunes after successful uploads; `BACKUP_KEEP_DAYS`), `backup:offsite` to test it
       now, where to see results (`fly logs`, the bucket), that backups are not encrypted and the token
       must stay private, and keeping `SESSION_SECRET`/`SHARE_HMAC_KEY` in a password manager (needed
       after a restore for expiring share links)
-- [ ] README: "Restore on Fly.io" (`restore:offsite` over `fly ssh console` with the `setpriv` prefix,
+- [x] README: "Restore on Fly.io" (`restore:offsite` over `fly ssh console` with the `setpriv` prefix,
       then `fly machine restart`; free-space rule; cancelling a staged or stuck restore with
       `fly secrets set RESTORE_ABORT=1` then `fly secrets unset RESTORE_ABORT`), Fly volume snapshots (`fly volumes snapshots list`, retention); moving local notes
       to Fly (`docker compose exec -e BACKUP_S3_…=… app npm run backup:offsite` locally, then
       `restore:offsite` on Fly); and the entrypoint/`user: "1000:1000"` note in the Docker section
-- [ ] update CLAUDE.md (entrypoint/uid rule, `CLIENT_IP_HEADER`, `fly.toml` invariants test, backup
+- [x] update CLAUDE.md (entrypoint/uid rule, `CLIENT_IP_HEADER`, `fly.toml` invariants test, backup
       service/reader, off-site job and retention, restore staging and startup swap, never test against
       the user's Compose project)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/` (left in place: the harness moves it after all phases finish)
+- ➕ deviation: the documented Fly commands use `npm --prefix /app/apps/server run …` after the `setpriv`
+      prefix (the working directory of a `fly ssh console -C` session is not guaranteed to be the image's
+      `WORKDIR`); the README also documents the `BACKUP_*` variables in the Configuration table, a
+      `reset-password` example over `fly ssh console --pty`, and `npm run test:docker`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

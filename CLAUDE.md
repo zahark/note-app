@@ -10,6 +10,10 @@ covers setup, env vars, Docker, backup and password reset.
 - `npm test` — Vitest in both apps (server tests use in-memory SQLite + `app.inject`)
 - `npm run lint` — ESLint + type checks of server, web and `e2e/`
 - `npm run test:e2e` — Playwright smoke test (builds, runs the compiled server on :3100, temp DATA_DIR)
+- `npm run test:docker` — `scripts/check-docker-image.sh`: builds the image as `notes-app:docker-check`
+  and checks it with throwaway `notes-app-check-*` volumes/containers (Fly-like root start on a
+  root-owned `volume-nocopy` volume, Compose-like `--user 1000:1000`, `docker exec` file ownership,
+  `docker compose config` pins `CLIENT_IP_HEADER` empty); removes everything on exit
 - `npm run build` / `npm run dev`
 - Single test file: `npm test -w apps/server -- test/move.test.ts`,
   `npm test -w apps/web -- src/features/tree/dnd.test.ts`
@@ -20,8 +24,12 @@ covers setup, env vars, Docker, backup and password reset.
   TS 7 until typescript-eslint does.
 - Nothing loads `.env` automatically (no dotenv, no `--env-file`); `loadConfig` reads only
   `process.env`. Export it first: `set -a; . ./.env; set +a`.
-- `npm run reset-password` and `npm run backup` run the compiled `dist/cli/*.js`, so run
-  `npm run build -w apps/server` first after changing them.
+- `npm run reset-password`, `backup`, `backup:offsite` and `restore:offsite` run the compiled
+  `dist/cli/*.js`, so run `npm run build -w apps/server` first after changing them.
+- **Never touch the user's running Compose project `notes-app`** (container `notes-app-app-1`, image
+  `notes-app:latest`, volume `notes-app_notes-data`, which holds real notes). Docker checks use their own
+  project name, image tag and throwaway volumes. S3 tests run against the in-process fake
+  (`test/helpers/fakeS3.ts`), never real R2.
 
 ## Server layout
 
@@ -33,9 +41,11 @@ the 429; an outcome known only after an await (a password check) is `reserve`d f
 
 `buildApp(opts)` seams: `auth: {hasher, hashLimiter, now}` (fake hasher, hash limiter and clock; the
 share service shares them), `webDir` (serve a built SPA), `attachmentSweep` (the daily stray-upload
-sweep). **`attachmentSweep` is off by default and only `src/index.ts` turns it on; tests must never
-enable it against the default `./data`** — an in-memory test DB has no attachment rows, so the sweep
-would delete real uploads as strays. `test/helpers/auth.ts` `makeApp` also takes `onRoute` (hook
+sweep), `offsiteBackup` (the off-site backup scheduler, needs `config.offsiteBackup`). **Both are off
+by default and only `src/index.ts` turns them on; tests must never enable `attachmentSweep` against the
+default `./data`** — an in-memory test DB has no attachment rows, so the sweep would delete real uploads
+as strays. Timers and Fastify hooks stay in `app.ts` (`scheduleAttachmentSweep`,
+`scheduleOffsiteBackup`); `services/` stays framework-free. Server code never imports `cli/`. `test/helpers/auth.ts` `makeApp` also takes `onRoute` (hook
 installed before ready, used by the isolation coverage check) and `hashWaitMs`.
 
 ## Web
@@ -213,10 +223,53 @@ installed before ready, used by the isolation coverage check) and `hashWaitMs`.
 
 ## Deployment
 
-See the README "Docker" section. Invariants that keep the rate-limit IP keys correct:
+See the README "Docker", "Deploying to Fly.io", "Off-site backups" and "Restore on Fly.io" sections.
 
-- `TRUST_PROXY` is set explicitly in the base `docker-compose.yml` and in every override, so a value in
-  `.env` never leaks into a deployment it does not fit.
+- **The server only ever runs as uid/gid 1000.** The image has no `USER`; `docker-entrypoint.sh`, when
+  started as root (Fly mounts root-owned empty volumes), chowns the top of `DATA_DIR` to 1000:1000 if
+  needed and `exec`s the command through `setpriv --reuid=1000 --regid=1000 --clear-groups`; started as
+  anyone else it just `exec`s. `docker-compose.yml` sets `user: "1000:1000"` (so `compose exec` is 1000
+  too). Operator commands over `fly ssh console` (root) must use the same `setpriv` prefix;
+  `restore:offsite` refuses to run as root.
+- Client address for the per-IP limits: `request.clientIp` (set once per request in an `onRequest` hook
+  by `clientIpOf`), never `request.ip`. With `CLIENT_IP_HEADER` (e.g. `Fly-Client-IP`) it is that
+  header's value when it is a single valid IP, else the socket address (fallback logged at debug only).
+  `CLIENT_IP_HEADER` and a trusting `TRUST_PROXY` together are a `ConfigError`.
+- `TRUST_PROXY` and `CLIENT_IP_HEADER` are set explicitly (pinned empty) in the base `docker-compose.yml`
+  and every override sets `TRUST_PROXY`, so a value in `.env` never leaks into a deployment it does not fit.
 - The tunnel override trusts only `cloudflared`'s fixed address `172.30.0.10`, never the subnet; the
   network's dynamic `ip_range` is `172.30.0.128/25` so nothing else can get `.10`.
-- Whenever `TRUST_PROXY` is set, the app port must be reachable only through that proxy.
+- Whenever `TRUST_PROXY` or `CLIENT_IP_HEADER` is set, the app port must be reachable only through that
+  proxy.
+- `fly.toml` invariants are guarded by `test/fly-config.test.ts` (own minimal TOML reader): only
+  `[http_service]` on internal port 3000 with `force_https` (no `[[services]]`/`ports`), always on
+  (`auto_stop_machines = "off"`, `min_machines_running = 1`), `/api/health` check, volume at `/data`,
+  `512mb` (argon2: 5 × 64 MiB at peak), `CLIENT_IP_HEADER = "Fly-Client-IP"` and no `TRUST_PROXY`,
+  `UPLOAD_QUOTA_MB` ≤ 40% of `[mounts] initial_size` (restore room), and no secrets or `RESTORE_ABORT`.
+
+## Backups (local and off-site) and restore
+
+- `services/backup.ts` holds the backup core: `runBackup` (SQLite online backup + ustar/gzip of the
+  referenced uploads, throws `BackupError`), `writeUploadsArchive` and the streaming reader
+  `readUploadsArchive` (regular files `uploads/<SAFE_STORAGE_NAME>` only, no duplicates, checksums and
+  end marker checked). `cli/backup.ts` is a thin `main` mapping `BackupError` → `CliError`.
+- `services/s3.ts`: minimal S3 client on `aws4fetch`'s `AwsV4Signer` + `node:http(s)` (streamed
+  `UNSIGNED-PAYLOAD` PUT with explicit length, streamed GET, ListObjectsV2, DELETE), 60 s
+  connect/idle timeout, `AbortSignal` everywhere, errors are `S3Error(status, code, message)` and never
+  contain credentials. Config accepts only `https:` endpoints; `http:` exists for the test fake.
+- `config.offsiteBackup` comes from `parseOffsiteBackupConfig(env)` (the `BACKUP_*` rules only; all four
+  required variables or none). The off-site CLIs use it via `cliOffsiteConfig` and need no server secrets.
+- `services/offsiteBackup.ts`: `runOffsiteBackup` snapshots into a temp dir under `os.tmpdir()` (never the
+  volume) and uploads `uploads.tar.gz`, `notes.db`, then `manifest.json` last (= complete).
+  `pruneOffsiteBackups` runs only after a successful scheduled upload: deletes complete backups older
+  than `keepDays` but always keeps the newest 7, deletes incomplete ones older than a day, ages from the
+  backup name, ignores unknown keys. Only the scheduler writes `DATA_DIR/offsite-backup.json`
+  (`lastSuccessAt` = snapshot time); the `backup:offsite` CLI never writes it and never prunes.
+- Restore is two-phase, all inside `DATA_DIR` (layout names in `services/restore.ts`):
+  `restore:offsite <name>` (app running) verifies manifest, free space (+10%), sizes, SHA-256 and
+  `integrity_check` into `restore-staging/`, fsyncs, writes `READY` last and renames to `restore/`;
+  `applyStagedRestore` (called in `index.ts` before `openDataDb`) swaps with renames only, keeping the old
+  `notes.db` + WAL/SHM + `uploads/` in `restore-previous/` until done. Every step is keyed on what is
+  still staged, so a re-run after a crash converges; `RESTORE_ABORT` rolls a swap back, then discards
+  the stage. Any error stops startup (`RestoreError` with the `RESTORE_ABORT` hint). Tests simulate
+  crashes through the `afterStep` seam; keep the crash-at-every-step tests green when touching it.
