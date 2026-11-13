@@ -1,6 +1,7 @@
 import { isIP } from 'node:net'
 import path from 'node:path'
 import { z } from 'zod'
+import { HOUR_SEC, SECOND_MS } from './units.js'
 
 /** DATA_DIR when unset, resolved against the working directory. */
 export const DEFAULT_DATA_DIR = './data'
@@ -39,6 +40,31 @@ export interface Config {
   logLevel: LogLevel
   /** Per-account limit on the total size of stored images, in MiB; 0 means no limit. */
   uploadQuotaMb: number
+  /** RESTORE_ABORT: discard a staged restore at startup (rolling back a swap in progress) instead of applying it. */
+  restoreAbort: boolean
+  /** Daily off-site backup target (BACKUP_S3_*); `null` when off-site backups are not configured. */
+  offsiteBackup: OffsiteBackupConfig | null
+}
+
+/**
+ * Off-site backup settings, parsed from the BACKUP_* variables by `parseOffsiteBackupConfig`. Its first
+ * five fields are what the S3 client needs. `secretAccessKey` must never be logged: log lines name only
+ * the endpoint host, the bucket and the prefix.
+ */
+export interface OffsiteBackupConfig {
+  /** S3 API origin, always https with no path, e.g. https://<account-id>.r2.cloudflarestorage.com */
+  endpoint: URL
+  bucket: string
+  accessKeyId: string
+  secretAccessKey: string
+  /** SigV4 signing region; R2 expects `auto`. */
+  region: string
+  /** Key prefix every backup lives under; always ends with `/`, never starts with one. */
+  prefix: string
+  /** How old the last successful upload may get before the next one is due, in milliseconds. */
+  intervalMs: number
+  /** Complete backups older than this are pruned (the newest few are always kept). */
+  keepDays: number
 }
 
 /**
@@ -160,6 +186,124 @@ const uploadQuotaMb = optional(
     .default(DEFAULT_UPLOAD_QUOTA_MB),
 )
 
+const restoreAbort = optional(
+  z.enum(['true', 'false', '1', '0'], { error: 'RESTORE_ABORT must be 1/true or 0/false (or unset)' }).optional(),
+).transform((v) => v === 'true' || v === '1')
+
+/** The BACKUP_* variables that switch off-site backups on: all four set, or none. */
+export const OFFSITE_BACKUP_REQUIRED = [
+  'BACKUP_S3_ENDPOINT',
+  'BACKUP_S3_BUCKET',
+  'BACKUP_S3_ACCESS_KEY_ID',
+  'BACKUP_S3_SECRET_ACCESS_KEY',
+] as const
+
+export const DEFAULT_BACKUP_REGION = 'auto'
+export const DEFAULT_BACKUP_PREFIX = 'notes-backups/'
+export const DEFAULT_BACKUP_INTERVAL_HOURS = 24
+export const DEFAULT_BACKUP_KEEP_DAYS = 30
+
+const backupEndpoint = optional(
+  z
+    .string()
+    .trim()
+    .transform((value, ctx) => {
+      // messages never echo the raw value: it could carry credentials
+      let url: URL
+      try {
+        url = new URL(value)
+      } catch {
+        ctx.addIssue({ code: 'custom', message: 'BACKUP_S3_ENDPOINT must be an absolute https URL' })
+        return z.NEVER
+      }
+      if (url.protocol !== 'https:') {
+        ctx.addIssue({ code: 'custom', message: 'BACKUP_S3_ENDPOINT must use https' })
+        return z.NEVER
+      }
+      const trimmed = (value.endsWith('/') ? value.slice(0, -1) : value).toLowerCase()
+      if (trimmed !== url.origin) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            'BACKUP_S3_ENDPOINT must be an origin only (https://host[:port], no path, query or credentials), ' +
+            `e.g. ${url.origin}`,
+        })
+        return z.NEVER
+      }
+      return new URL(url.origin)
+    })
+    .optional(),
+)
+
+const backupBucket = optional(
+  z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/,
+      'BACKUP_S3_BUCKET must be 3-63 lowercase letters, digits, - and . (starting and ending with a letter or digit)',
+    )
+    .optional(),
+)
+
+const backupCredential = optional(z.string().trim().optional())
+
+const backupRegion = optional(
+  z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9-]{1,32}$/, 'BACKUP_S3_REGION must be lowercase letters, digits and - (R2: auto)')
+    .default(DEFAULT_BACKUP_REGION),
+)
+
+const backupPrefix = optional(
+  z
+    .string()
+    .trim()
+    .optional()
+    .transform((raw, ctx) => {
+      if (raw === undefined) return DEFAULT_BACKUP_PREFIX
+      const problem = raw.startsWith('/')
+        ? 'must not start with /'
+        : raw.includes('..')
+          ? 'must not contain ..'
+          : raw.includes('//')
+            ? 'must not contain //'
+            : !/^[A-Za-z0-9._/-]+$/.test(raw)
+              ? 'may contain only letters, digits, ., _, - and /'
+              : null
+      if (problem !== null) {
+        ctx.addIssue({ code: 'custom', message: `BACKUP_S3_PREFIX ${problem}` })
+        return z.NEVER
+      }
+      return raw.endsWith('/') ? raw : `${raw}/`
+    }),
+)
+
+const intInRange = (name: string, min: number, max: number, fallback: number) => {
+  const message = `${name} must be an integer from ${min} to ${max}`
+  return optional(
+    z
+      .string()
+      .trim()
+      .regex(/^\d+$/, message)
+      .transform(Number)
+      .pipe(z.number().int().min(min, message).max(max, message))
+      .default(fallback),
+  )
+}
+
+const offsiteBackupEnvSchema = z.object({
+  BACKUP_S3_ENDPOINT: backupEndpoint,
+  BACKUP_S3_BUCKET: backupBucket,
+  BACKUP_S3_ACCESS_KEY_ID: backupCredential,
+  BACKUP_S3_SECRET_ACCESS_KEY: backupCredential,
+  BACKUP_S3_REGION: backupRegion,
+  BACKUP_S3_PREFIX: backupPrefix,
+  BACKUP_INTERVAL_HOURS: intInRange('BACKUP_INTERVAL_HOURS', 1, 168, DEFAULT_BACKUP_INTERVAL_HOURS),
+  BACKUP_KEEP_DAYS: intInRange('BACKUP_KEEP_DAYS', 1, 3650, DEFAULT_BACKUP_KEEP_DAYS),
+})
+
 const logLevel = optional(
   z.enum(LOG_LEVELS, { error: `LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')}` }).default('info'),
 )
@@ -176,7 +320,61 @@ const envSchema = z.object({
   PORT: port,
   LOG_LEVEL: logLevel,
   UPLOAD_QUOTA_MB: uploadQuotaMb,
+  RESTORE_ABORT: restoreAbort,
+  ...offsiteBackupEnvSchema.shape,
 })
+
+/** One line per zod issue, prefixed with the variable name unless the message already starts with it. */
+function issueMessages(error: z.ZodError): string[] {
+  return error.issues.map((i) => {
+    const key = i.path.join('.')
+    return i.message.startsWith(key) ? i.message : `${key}: ${i.message}`
+  })
+}
+
+const isSet = (value: string | undefined): boolean => value !== undefined && value.trim() !== ''
+
+/** The "all four or none" rule, read from the raw env so it is reported even when another value is invalid. */
+function missingBackupProblems(env: NodeJS.ProcessEnv): string[] {
+  const missing = OFFSITE_BACKUP_REQUIRED.filter((name) => !isSet(env[name]))
+  if (missing.length === 0 || missing.length === OFFSITE_BACKUP_REQUIRED.length) return []
+  return [`off-site backups need all of ${OFFSITE_BACKUP_REQUIRED.join(', ')}; missing: ${missing.join(', ')}`]
+}
+
+function offsiteBackupFrom(e: z.output<typeof offsiteBackupEnvSchema>): OffsiteBackupConfig | null {
+  const endpoint = e.BACKUP_S3_ENDPOINT
+  const bucket = e.BACKUP_S3_BUCKET
+  const accessKeyId = e.BACKUP_S3_ACCESS_KEY_ID
+  const secretAccessKey = e.BACKUP_S3_SECRET_ACCESS_KEY
+  // callers have already rejected a partial set, so any one unset means all are
+  if (endpoint === undefined || bucket === undefined || accessKeyId === undefined || secretAccessKey === undefined) {
+    return null
+  }
+  return {
+    endpoint,
+    bucket,
+    accessKeyId,
+    secretAccessKey,
+    region: e.BACKUP_S3_REGION,
+    prefix: e.BACKUP_S3_PREFIX,
+    intervalMs: e.BACKUP_INTERVAL_HOURS * HOUR_SEC * SECOND_MS,
+    keepDays: e.BACKUP_KEEP_DAYS,
+  }
+}
+
+/**
+ * Parses only the BACKUP_* variables: `null` when off-site backups are not configured, the settings when
+ * all four required ones are set. Throws ConfigError on a partial set or an invalid value. The operator
+ * CLIs use it directly, so they run without the server's secrets.
+ */
+export function parseOffsiteBackupConfig(env: NodeJS.ProcessEnv = process.env): OffsiteBackupConfig | null {
+  const result = offsiteBackupEnvSchema.safeParse(env)
+  const missing = missingBackupProblems(env)
+  if (!result.success || missing.length > 0) {
+    throw configError([...(result.success ? [] : issueMessages(result.error)), ...missing])
+  }
+  return offsiteBackupFrom(result.data)
+}
 
 /**
  * Parses and validates the server configuration from environment variables.
@@ -184,12 +382,9 @@ const envSchema = z.object({
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const result = envSchema.safeParse(env)
-  if (!result.success) {
-    const problems = result.error.issues.map((i) => {
-      const key = i.path.join('.')
-      return i.message.startsWith(key) ? i.message : `${key}: ${i.message}`
-    })
-    throw configError(problems)
+  const missing = missingBackupProblems(env)
+  if (!result.success || missing.length > 0) {
+    throw configError([...(result.success ? [] : issueMessages(result.error)), ...missing])
   }
   const e = result.data
   // both name a source of the client address; trusting two would let either one be forged
@@ -212,6 +407,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: e.PORT,
     logLevel: e.LOG_LEVEL,
     uploadQuotaMb: e.UPLOAD_QUOTA_MB,
+    restoreAbort: e.RESTORE_ABORT,
+    offsiteBackup: offsiteBackupFrom(e),
   }
 }
 

@@ -363,19 +363,19 @@
 - Modify: `apps/server/test/config.test.ts`
 - Modify: `.env.example`
 
-- [ ] write tests first: none set → `offsiteBackup: null`; all four required set → parsed object with
+- [x] write tests first: none set → `offsiteBackup: null`; all four required set → parsed object with
       defaults (`region: 'auto'`, `prefix: 'notes-backups/'`, 24 h interval, 30 keep days); some but not
       all set → `ConfigError` naming the missing variables; blank strings count as unset; endpoint must be
       an `https:` URL without path, query or credentials; bucket name rules; prefix normalised (trailing
       `/` added) and rejected with a leading `/` or `..`; `BACKUP_INTERVAL_HOURS` 1-168 and
       `BACKUP_KEEP_DAYS` 1-3650 integers; `RESTORE_ABORT` parsing
-- [ ] export `parseOffsiteBackupConfig(env)` from `config.ts` (the `BACKUP_*` rules only, throwing
+- [x] export `parseOffsiteBackupConfig(env)` from `config.ts` (the `BACKUP_*` rules only, throwing
       `ConfigError`), used by `loadConfig` and by the Task 8 CLIs, so the CLIs need no server secrets;
       test it directly with an env that has no `SESSION_SECRET`/`SHARE_HMAC_KEY`/`PUBLIC_ORIGIN`
-- [ ] add the variables to `envSchema` and `Config`, following the existing `optional()` pattern and
+- [x] add the variables to `envSchema` and `Config`, following the existing `optional()` pattern and
       error style; no error message or log line includes `BACKUP_S3_SECRET_ACCESS_KEY`'s value (test it)
-- [ ] document the variables (commented out) in `.env.example`
-- [ ] run tests - must pass before task 5
+- [x] document the variables (commented out) in `.env.example`
+- [x] run tests - must pass before task 5
 
 ### Task 5: Move the backup core into a service and add the tar reader
 

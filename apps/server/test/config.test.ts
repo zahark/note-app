@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { buildApp } from '../src/app.js'
-import { ConfigError, loadConfig, type Config } from '../src/config.js'
+import { ConfigError, loadConfig, parseOffsiteBackupConfig, type Config } from '../src/config.js'
 import { openDb } from '../src/db/index.js'
 
 const SECRET = 'a'.repeat(32)
@@ -212,6 +212,241 @@ describe('loadConfig: CLIENT_IP_HEADER', () => {
     const config = loadConfig(baseEnv({ CLIENT_IP_HEADER: 'Fly-Client-IP', TRUST_PROXY: trust }))
     expect(config.clientIpHeader).toBe('fly-client-ip')
     expect(config.trustProxy).toBe(false)
+  })
+})
+
+const BACKUP_SECRET = 'r2-secret-DO-NOT-LEAK-0123456789abcdef'
+
+/** The four variables that switch off-site backups on (all or none). */
+const backupRequired = (): Record<string, string> => ({
+  BACKUP_S3_ENDPOINT: 'https://0123abcd.r2.cloudflarestorage.com',
+  BACKUP_S3_BUCKET: 'notes-backups',
+  BACKUP_S3_ACCESS_KEY_ID: 'AKIDEXAMPLE',
+  BACKUP_S3_SECRET_ACCESS_KEY: BACKUP_SECRET,
+})
+
+/** Message of the ConfigError `fn` throws (fails the test when it throws nothing else). */
+const configErrorOf = (fn: () => unknown): string => {
+  try {
+    fn()
+  } catch (err) {
+    expect(err).toBeInstanceOf(ConfigError)
+    return (err as Error).message
+  }
+  throw new Error('expected a ConfigError')
+}
+
+describe('parseOffsiteBackupConfig', () => {
+  it('none set → null (backups off)', () => {
+    expect(parseOffsiteBackupConfig({})).toBeNull()
+    expect(loadConfig(baseEnv()).offsiteBackup).toBeNull()
+  })
+
+  it('blank values count as unset', () => {
+    const blank = {
+      BACKUP_S3_ENDPOINT: '',
+      BACKUP_S3_BUCKET: ' ',
+      BACKUP_S3_ACCESS_KEY_ID: '',
+      BACKUP_S3_SECRET_ACCESS_KEY: '',
+      BACKUP_S3_REGION: '',
+      BACKUP_S3_PREFIX: '',
+      BACKUP_INTERVAL_HOURS: '',
+      BACKUP_KEEP_DAYS: '',
+    }
+    expect(parseOffsiteBackupConfig(blank)).toBeNull()
+    expect(parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_S3_REGION: '', BACKUP_S3_PREFIX: ' ' })).toMatchObject({
+      region: 'auto',
+      prefix: 'notes-backups/',
+    })
+  })
+
+  it('all four required set → parsed object with defaults', () => {
+    const cfg = parseOffsiteBackupConfig(backupRequired())
+    expect(cfg).not.toBeNull()
+    expect(cfg?.endpoint).toBeInstanceOf(URL)
+    expect(cfg?.endpoint.href).toBe('https://0123abcd.r2.cloudflarestorage.com/')
+    expect(cfg).toMatchObject({
+      bucket: 'notes-backups',
+      accessKeyId: 'AKIDEXAMPLE',
+      secretAccessKey: BACKUP_SECRET,
+      region: 'auto',
+      prefix: 'notes-backups/',
+      intervalMs: 24 * 60 * 60 * 1000,
+      keepDays: 30,
+    })
+  })
+
+  it('works without the server secrets (for the operator CLIs)', () => {
+    const env = backupRequired()
+    expect(env.SESSION_SECRET).toBeUndefined()
+    expect(parseOffsiteBackupConfig(env)?.bucket).toBe('notes-backups')
+  })
+
+  it('reads explicit optional values', () => {
+    const cfg = parseOffsiteBackupConfig({
+      ...backupRequired(),
+      BACKUP_S3_REGION: 'us-east-1',
+      BACKUP_S3_PREFIX: 'home/notes',
+      BACKUP_INTERVAL_HOURS: '6',
+      BACKUP_KEEP_DAYS: '90',
+    })
+    expect(cfg).toMatchObject({ region: 'us-east-1', prefix: 'home/notes/', intervalMs: 6 * 60 * 60 * 1000, keepDays: 90 })
+  })
+
+  it('loadConfig exposes the same object', () => {
+    const config = loadConfig(baseEnv({ ...backupRequired(), BACKUP_KEEP_DAYS: '7' }))
+    expect(config.offsiteBackup).toEqual(parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_KEEP_DAYS: '7' }))
+  })
+
+  it.each([
+    ['BACKUP_S3_ENDPOINT'],
+    ['BACKUP_S3_BUCKET'],
+    ['BACKUP_S3_ACCESS_KEY_ID'],
+    ['BACKUP_S3_SECRET_ACCESS_KEY'],
+  ])('some but not all set → ConfigError naming the missing %s', (missing) => {
+    const env: NodeJS.ProcessEnv = backupRequired()
+    delete env[missing]
+    const message = configErrorOf(() => parseOffsiteBackupConfig(env))
+    expect(message).toContain(`missing: ${missing}`)
+    expect(configErrorOf(() => loadConfig(baseEnv(env)))).toContain(`missing: ${missing}`)
+  })
+
+  it('names every missing variable, and a blank one counts as missing', () => {
+    const message = configErrorOf(() =>
+      parseOffsiteBackupConfig({ BACKUP_S3_BUCKET: 'notes-backups', BACKUP_S3_ENDPOINT: '  ' }),
+    )
+    expect(message).toContain('missing: BACKUP_S3_ENDPOINT, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY')
+  })
+
+  it('only optional settings set → backups stay off', () => {
+    expect(parseOffsiteBackupConfig({ BACKUP_S3_REGION: 'auto', BACKUP_KEEP_DAYS: '10' })).toBeNull()
+  })
+
+  it('loadConfig reports a partial backup config together with other problems', () => {
+    const message = configErrorOf(() => loadConfig({ BACKUP_S3_BUCKET: 'notes-backups' }))
+    expect(message).toContain('SESSION_SECRET')
+    expect(message).toContain('missing: BACKUP_S3_ENDPOINT')
+  })
+
+  it.each([
+    ['https://0123abcd.r2.cloudflarestorage.com', 'https://0123abcd.r2.cloudflarestorage.com/'],
+    ['https://0123abcd.r2.cloudflarestorage.com/', 'https://0123abcd.r2.cloudflarestorage.com/'],
+    ['https://s3.example.com:9000', 'https://s3.example.com:9000/'],
+  ])('accepts endpoint %s', (value, href) => {
+    expect(parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_S3_ENDPOINT: value })?.endpoint.href).toBe(href)
+  })
+
+  it.each([
+    ['plain http', 'http://0123abcd.r2.cloudflarestorage.com'],
+    ['not a url', '0123abcd.r2.cloudflarestorage.com'],
+    ['other scheme', 'ftp://0123abcd.r2.cloudflarestorage.com'],
+    ['with a path', 'https://0123abcd.r2.cloudflarestorage.com/notes-backups'],
+    ['with a query', 'https://0123abcd.r2.cloudflarestorage.com/?x=1'],
+    ['with a fragment', 'https://0123abcd.r2.cloudflarestorage.com#x'],
+    ['with credentials', 'https://user:pw@0123abcd.r2.cloudflarestorage.com'],
+  ])('rejects an endpoint %s', (_label, value) => {
+    const message = configErrorOf(() => parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_S3_ENDPOINT: value }))
+    expect(message).toContain('BACKUP_S3_ENDPOINT')
+    expect(message).not.toContain('pw@')
+  })
+
+  it.each(['abc', 'notes-backups', 'notes.backups.2026', 'a'.repeat(63)])('accepts bucket %s', (bucket) => {
+    expect(parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_S3_BUCKET: bucket })?.bucket).toBe(bucket)
+  })
+
+  it.each(['ab', 'a'.repeat(64), 'Notes', 'notes_backups', 'notes/backups', '-notes', 'notes-', 'notes backups'])(
+    'rejects bucket %s',
+    (bucket) => {
+      expect(configErrorOf(() => parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_S3_BUCKET: bucket }))).toContain(
+        'BACKUP_S3_BUCKET',
+      )
+    },
+  )
+
+  it.each([
+    ['notes-backups', 'notes-backups/'],
+    ['notes-backups/', 'notes-backups/'],
+    ['home/notes', 'home/notes/'],
+    ['v1.notes_x', 'v1.notes_x/'],
+  ])('normalises prefix %s → %s', (value, prefix) => {
+    expect(parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_S3_PREFIX: value })?.prefix).toBe(prefix)
+  })
+
+  it.each(['/notes', '/', '../notes', 'notes/../x', 'notes..x', 'a//b', 'notes backups', 'notes?x', 'notes%2f'])(
+    'rejects prefix %s',
+    (value) => {
+      expect(configErrorOf(() => parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_S3_PREFIX: value }))).toContain(
+        'BACKUP_S3_PREFIX',
+      )
+    },
+  )
+
+  it.each(['UPPER', 'us east', 'a'.repeat(33)])('rejects region %s', (value) => {
+    expect(configErrorOf(() => parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_S3_REGION: value }))).toContain(
+      'BACKUP_S3_REGION',
+    )
+  })
+
+  it.each([
+    ['1', 1],
+    ['168', 168],
+  ])('accepts BACKUP_INTERVAL_HOURS=%s', (value, hours) => {
+    expect(parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_INTERVAL_HOURS: value })?.intervalMs).toBe(
+      hours * 60 * 60 * 1000,
+    )
+  })
+
+  it.each(['0', '169', '-1', '1.5', '24h', 'daily'])('rejects BACKUP_INTERVAL_HOURS=%s', (value) => {
+    expect(configErrorOf(() => parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_INTERVAL_HOURS: value }))).toContain(
+      'BACKUP_INTERVAL_HOURS',
+    )
+  })
+
+  it.each([
+    ['1', 1],
+    ['3650', 3650],
+  ])('accepts BACKUP_KEEP_DAYS=%s', (value, days) => {
+    expect(parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_KEEP_DAYS: value })?.keepDays).toBe(days)
+  })
+
+  it.each(['0', '3651', '-5', '2.5', '30d'])('rejects BACKUP_KEEP_DAYS=%s', (value) => {
+    expect(configErrorOf(() => parseOffsiteBackupConfig({ ...backupRequired(), BACKUP_KEEP_DAYS: value }))).toContain(
+      'BACKUP_KEEP_DAYS',
+    )
+  })
+
+  it('validates optional settings even while backups are off', () => {
+    expect(configErrorOf(() => parseOffsiteBackupConfig({ BACKUP_KEEP_DAYS: 'forever' }))).toContain('BACKUP_KEEP_DAYS')
+  })
+
+  it.each([
+    ['partial config', { BACKUP_S3_SECRET_ACCESS_KEY: BACKUP_SECRET }],
+    ['bad endpoint', { ...backupRequired(), BACKUP_S3_ENDPOINT: 'http://x.example.com/path' }],
+    ['bad bucket', { ...backupRequired(), BACKUP_S3_BUCKET: 'Bad_Bucket' }],
+    ['bad prefix', { ...backupRequired(), BACKUP_S3_PREFIX: '/abs' }],
+    ['bad interval', { ...backupRequired(), BACKUP_INTERVAL_HOURS: 'x' }],
+    ['secret with spaces', { ...backupRequired(), BACKUP_S3_ACCESS_KEY_ID: '', BACKUP_S3_SECRET_ACCESS_KEY: ` ${BACKUP_SECRET} ` }],
+  ])('never puts the secret access key in an error message (%s)', (_label, env) => {
+    expect(configErrorOf(() => parseOffsiteBackupConfig(env))).not.toContain(BACKUP_SECRET)
+    expect(configErrorOf(() => loadConfig(baseEnv(env)))).not.toContain(BACKUP_SECRET)
+    expect(configErrorOf(() => loadConfig(env))).not.toContain(BACKUP_SECRET)
+  })
+})
+
+describe('loadConfig: RESTORE_ABORT', () => {
+  it.each([
+    [undefined, false],
+    ['', false],
+    ['0', false],
+    ['false', false],
+    ['1', true],
+    ['true', true],
+  ])('RESTORE_ABORT=%j → %s', (value, abort) => {
+    expect(loadConfig(baseEnv({ RESTORE_ABORT: value })).restoreAbort).toBe(abort)
+  })
+
+  it.each(['yes', 'TRUE', '2', 'abort'])('rejects RESTORE_ABORT=%s', (value) => {
+    expect(configErrorOf(() => loadConfig(baseEnv({ RESTORE_ABORT: value })))).toContain('RESTORE_ABORT')
   })
 })
 
