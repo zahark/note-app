@@ -4,6 +4,8 @@ import path from 'node:path'
 import { buildApp, defaultWebDir } from './app.js'
 import { ConfigError, loadConfig, type Config } from './config.js'
 import { openDataDb } from './db/index.js'
+import { offsiteBackupTarget } from './services/offsiteBackup.js'
+import { HOUR_MS } from './units.js'
 
 async function main(): Promise<void> {
   let config: Config
@@ -28,12 +30,22 @@ async function main(): Promise<void> {
     db,
     logger: { level: config.logLevel },
     attachmentSweep: true,
+    offsiteBackup: config.offsiteBackup !== null,
     webDir: hasWebBuild ? webDir : undefined,
   })
   app.addHook('onClose', async () => {
     db.close()
   })
   app.log.info('notes-app server starting')
+  if (config.offsiteBackup) {
+    const { intervalMs, keepDays } = config.offsiteBackup
+    app.log.info(
+      { ...offsiteBackupTarget(config.offsiteBackup), intervalHours: intervalMs / HOUR_MS, keepDays },
+      'off-site backups on',
+    )
+  } else {
+    app.log.info('off-site backups off (BACKUP_S3_* not set)')
+  }
   if (!hasWebBuild) app.log.warn(`no web build at ${webDir}; serving the API only`)
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {

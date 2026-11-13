@@ -9,7 +9,7 @@ import Fastify, {
   type FastifyRequest,
   type FastifyServerOptions,
 } from 'fastify'
-import type { Config, TrustProxy } from './config.js'
+import type { Config, OffsiteBackupConfig, TrustProxy } from './config.js'
 import type { Db } from './db/index.js'
 import { errorBody, errorHandler, notFound } from './errors.js'
 import { registerSession } from './plugins/session.js'
@@ -24,10 +24,18 @@ import { sweepAttachments, type SweepResult } from './services/attachments.js'
 import { AuthService } from './services/auth.js'
 import { ipKey } from './services/ipKey.js'
 import type { HashLimiter } from './services/hashLimiter.js'
+import {
+  isOffsiteBackupDue,
+  offsiteBackupTarget,
+  pruneOffsiteBackups,
+  readOffsiteState,
+  runOffsiteBackup,
+  writeOffsiteState,
+} from './services/offsiteBackup.js'
 import type { PasswordHasher } from './services/password.js'
 import type { Clock } from './services/rateLimiter.js'
 import { ShareService, unavailable } from './services/share.js'
-import { DAY_MS } from './units.js'
+import { DAY_MS, HOUR_MS, MINUTE_MS } from './units.js'
 
 export interface BuildAppOptions {
   config: Config
@@ -45,6 +53,11 @@ export interface BuildAppOptions {
    * touch an uploads directory they did not set up; the server entry point turns it on.
    */
   attachmentSweep?: boolean
+  /**
+   * Run the off-site backup scheduler (`scheduleOffsiteBackup`) when `config.offsiteBackup` is set. Off by
+   * default so tests never upload anything; the server entry point turns it on.
+   */
+  offsiteBackup?: boolean
   /**
    * Directory with the built web app (`index.html` + assets). When set, its files are served and every
    * other GET of a non-API path falls back to `index.html`; when unset the app serves the API only.
@@ -144,6 +157,7 @@ export function buildApp({
   logger = false,
   auth = {},
   attachmentSweep = false,
+  offsiteBackup = false,
   webDir,
 }: BuildAppOptions): FastifyInstance {
   const app = Fastify({
@@ -188,6 +202,9 @@ export function buildApp({
   app.register(sharedRoutes)
 
   if (attachmentSweep) scheduleAttachmentSweep(app)
+  if (offsiteBackup && config.offsiteBackup) {
+    scheduleOffsiteBackup(app, { dataDir: config.dataDir, cfg: config.offsiteBackup })
+  }
 
   return app
 }
@@ -279,5 +296,99 @@ export function scheduleAttachmentSweep(
   })
   app.addHook('onClose', async () => {
     clearInterval(timer)
+  })
+}
+
+/** Delay of the first off-site backup check after the app is ready (it never holds up `listen`). */
+export const OFFSITE_FIRST_CHECK_MS = MINUTE_MS
+/** How often the off-site backup scheduler checks whether a backup is due. */
+export const OFFSITE_CHECK_INTERVAL_MS = HOUR_MS
+
+export interface OffsiteBackupSchedule {
+  dataDir: string
+  cfg: OffsiteBackupConfig
+  /** Clock in milliseconds (tests). */
+  now?: Clock
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Checks one minute after the app is ready and then hourly whether the last successful off-site backup
+ * (the state file) is at least `cfg.intervalMs` old, and if so runs one. One run at a time; a failure is
+ * logged and retried at the next hourly check. After a success it records the snapshot time in the state
+ * file, then prunes old backups (a prune failure is logged and does not undo the success). `app.close()`
+ * stops the timer, aborts an upload in flight and waits for that run to finish cleaning up. Log lines name
+ * only the endpoint host, bucket and prefix, and errors by their message (never credentials). `run` and
+ * `prune` are test seams.
+ */
+export function scheduleOffsiteBackup(
+  app: FastifyInstance,
+  { dataDir, cfg, now = Date.now }: OffsiteBackupSchedule,
+  run: typeof runOffsiteBackup = runOffsiteBackup,
+  prune: typeof pruneOffsiteBackups = pruneOffsiteBackups,
+): void {
+  const controller = new AbortController()
+  const { signal } = controller
+  const target = offsiteBackupTarget(cfg)
+  let timer: NodeJS.Timeout | undefined
+  let inFlight: Promise<void> | undefined
+
+  const check = async () => {
+    const startedAt = now()
+    if (!isOffsiteBackupDue(readOffsiteState(dataDir), cfg.intervalMs, startedAt)) return
+    let result: Awaited<ReturnType<typeof runOffsiteBackup>>
+    try {
+      result = await run(dataDir, cfg, { now: new Date(startedAt), signal })
+    } catch (err) {
+      if (signal.aborted) app.log.warn(target, 'offsite backup cancelled by shutdown')
+      else app.log.error({ ...target, error: errorMessage(err) }, 'offsite backup failed')
+      return
+    }
+    app.log.info(
+      {
+        ...target,
+        name: result.name,
+        notesDbBytes: result.files['notes.db'].size,
+        uploadsArchiveBytes: result.files['uploads.tar.gz'].size,
+        durationMs: now() - startedAt,
+      },
+      'offsite backup uploaded',
+    )
+    try {
+      // the snapshot time, not the finish time, so the daily slot does not drift by the upload's duration
+      writeOffsiteState(dataDir, { lastSuccessAt: new Date(startedAt).toISOString(), lastBackup: result.name })
+    } catch (err) {
+      app.log.error({ error: errorMessage(err) }, 'offsite backup state file not written')
+    }
+    try {
+      const { deleted } = await prune(cfg, new Date(now()), signal)
+      if (deleted.length > 0) app.log.info({ ...target, deleted }, 'old offsite backups pruned')
+    } catch (err) {
+      app.log.error({ ...target, error: errorMessage(err) }, 'offsite backup prune failed')
+    }
+  }
+
+  const tick = () => {
+    timer = setTimeout(tick, OFFSITE_CHECK_INTERVAL_MS)
+    timer.unref()
+    if (inFlight || signal.aborted) return
+    inFlight = check()
+      .catch((err: unknown) => app.log.error({ error: errorMessage(err) }, 'offsite backup check failed'))
+      .finally(() => {
+        inFlight = undefined
+      })
+  }
+
+  app.addHook('onReady', async () => {
+    timer = setTimeout(tick, OFFSITE_FIRST_CHECK_MS)
+    timer.unref()
+  })
+  app.addHook('onClose', async () => {
+    clearTimeout(timer)
+    controller.abort()
+    await inFlight
   })
 }

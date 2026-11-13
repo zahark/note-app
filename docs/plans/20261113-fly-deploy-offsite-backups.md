@@ -435,28 +435,35 @@
 - Modify: `apps/server/src/app.ts`
 - Modify: `apps/server/src/index.ts`
 
-- [ ] write tests first for `runOffsiteBackup(dataDir, cfg, { now, tmpRoot, signal })` with a fake S3
+- [x] write tests first for `runOffsiteBackup(dataDir, cfg, { now, tmpRoot, signal })` with a fake S3
       server: uploads `uploads.tar.gz`, then `notes.db`, then `manifest.json` (order checked) under
       `<prefix><name>/`; manifest sizes and SHA-256 match the uploaded bytes and `uploads.bytes` matches;
       returns `{ name, files }`; never touches `offsite-backup.json`; the temp directory is gone afterwards
       on success and on failure; a failed upload leaves no manifest
-- [ ] write tests first for `pruneOffsiteBackups`: deletes complete backups older than `keepDays` but
+- [x] write tests first for `pruneOffsiteBackups`: deletes complete backups older than `keepDays` but
       always keeps the newest 7 complete ones; deletes incomplete ones older than 1 day; leaves unknown
       keys under the prefix alone; never deletes anything when listing fails
-- [ ] write tests first for `scheduleOffsiteBackup` (in `app.ts`) with fake timers and injected fake
+- [x] write tests first for `scheduleOffsiteBackup` (in `app.ts`) with fake timers and injected fake
       `run`/`prune`: runs when the state file is missing,
       unreadable or older than the interval, skips when fresh; writes the state file only after a
       successful run (atomically); prunes only after success; never runs two at once; retries at the
       next hourly check after a failure; `app.close()` stops the timer and aborts an in-flight upload;
       the first check does not delay `listen`
-- [ ] implement `runOffsiteBackup` (on `runBackup` from `services/backup.ts` with `outDir` under
+- [x] implement `runOffsiteBackup` (on `runBackup` from `services/backup.ts` with `outDir` under
       `os.tmpdir()`) and `pruneOffsiteBackups` as plain functions in `services/offsiteBackup.ts`, and
       `scheduleOffsiteBackup(app, …)` in `app.ts` next to `scheduleAttachmentSweep`; logging per
       Technical Details
-- [ ] add the `offsiteBackup` option to `BuildAppOptions` (off by default, like `attachmentSweep`) and
+- [x] add the `offsiteBackup` option to `BuildAppOptions` (off by default, like `attachmentSweep`) and
       turn it on in `index.ts` when `config.offsiteBackup` is set; log once at startup whether off-site
       backups are on (endpoint host, bucket and prefix, never keys)
-- [ ] run tests - must pass before task 8
+- [x] run tests - must pass before task 8
+- ➕ deviation: a shared stateful fake S3 server lives in `apps/server/test/helpers/fakeS3.ts` (PUT/GET/
+      ListObjectsV2/DELETE with an `intercept` hook for errors and hangs) for this task's tests and Task 8's;
+      `units.ts` gained `HOUR_MS`. Backup ages for pruning come from the timestamp in the backup name (the
+      snapshot time), not the objects' `LastModified`; the state file's `lastSuccessAt` is the snapshot
+      (check start) time so the daily slot does not drift by the upload duration; a `lastSuccessAt` in the
+      future also counts as due. The hourly cadence is a fixed `setTimeout` chain with a single-flight flag,
+      and `app.close()` aborts the run in flight and then waits for it (so its temp directory is removed)
 
 ### Task 8: Operator commands: back up now, stage a restore from the bucket
 
