@@ -13,6 +13,10 @@ services:
     build: .
     image: notes-app:latest
     restart: unless-stopped
+    # run as the image's app user (uid/gid 1000), as before the image stopped baking in `USER`;
+    # `docker compose exec` also runs as 1000. Starting as root is only for platforms like Fly.io
+    # that mount root-owned volumes (the entrypoint then fixes /data's owner and drops to 1000).
+    user: "1000:1000"
     # optional settings (LOG_LEVEL, ALLOW_SIGNUP, ...) reach the container only through this file; it
     # is optional so that `docker compose config` and `--env-file` work without it, while the
     # required values below still stop Compose with a clear message when they are missing

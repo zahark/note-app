@@ -3,7 +3,8 @@
 #
 #   build      — full install, builds the web app (Vite) and compiles the server (tsc) to JavaScript
 #   prod-deps  — production dependencies of the server only (native modules built for this image)
-#   runtime    — node:22-slim, non-root uid/gid 1000, plain `node` (no tsx or other dev tooling)
+#   runtime    — node:22-slim, the server always runs as uid/gid 1000 (see docker-entrypoint.sh),
+#                plain `node` (no tsx or other dev tooling)
 
 ARG NODE_IMAGE=node:22-slim
 
@@ -35,8 +36,12 @@ ENV NODE_ENV=production \
     PORT=3000
 WORKDIR /app
 # the image's built-in `node` user is uid/gid 1000; /data is created owned by it so a fresh named
-# volume inherits that ownership (a bind mount must be chowned to 1000:1000 on the host instead)
+# volume inherits that ownership (a bind mount must be chowned to 1000:1000 on the host instead).
+# The entrypoint needs setpriv (util-linux, part of node:22-slim) to drop from root to 1000:1000.
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN test "$(id -u node):$(id -g node)" = "1000:1000" \
+ && command -v setpriv >/dev/null \
+ && chmod 0755 /app/docker-entrypoint.sh \
  && mkdir -p /data \
  && chown 1000:1000 /data
 COPY --from=prod-deps /app/node_modules node_modules
@@ -45,10 +50,13 @@ COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/web/dist apps/web/dist
-USER 1000:1000
+# No `USER` here: started as root (Fly.io mounts volumes root-owned and empty) the entrypoint chowns
+# DATA_DIR to 1000:1000 and drops to 1000:1000 with setpriv; started as 1000 (docker-compose.yml sets
+# `user: "1000:1000"`) it just runs the command. The server never runs as root.
 WORKDIR /app/apps/server
 VOLUME ["/data"]
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

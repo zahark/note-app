@@ -286,7 +286,7 @@
 - Create: `scripts/check-docker-image.sh`
 - Modify: `package.json` (script `test:docker`)
 
-- [ ] write `scripts/check-docker-image.sh` first (it fails against the current image): builds the image
+- [x] write `scripts/check-docker-image.sh` first (it fails against the current image): builds the image
       as `notes-app:docker-check` (never `notes-app:latest`), then with throwaway volumes and container
       names prefixed `notes-app-check-` (always removed on exit via `trap`):
       (a) Fly-like: create the volume, mount it with `--mount type=volume,src=…,dst=/data,volume-nocopy`
@@ -296,14 +296,14 @@
       runs as uid 1000, `/api/health` answers;
       (b) Compose-like: `--user 1000:1000` on a normal named volume → starts, `/data` stays 1000:1000;
       (c) a file created through `docker exec` in case (b) is owned by 1000
-- [ ] add `docker-entrypoint.sh` (see Technical Details), copy it into the runtime stage (executable),
+- [x] add `docker-entrypoint.sh` (see Technical Details), copy it into the runtime stage (executable),
       `ENTRYPOINT ["/app/docker-entrypoint.sh"]`, keep `CMD`, remove `USER 1000:1000` (keep the
       `mkdir -p /data && chown 1000:1000 /data` line); confirm `setpriv` exists in `node:22-slim`
       (install `util-linux` if not)
-- [ ] set `user: "1000:1000"` on the `app` service in `docker-compose.yml` with a comment (Compose keeps
+- [x] set `user: "1000:1000"` on the `app` service in `docker-compose.yml` with a comment (Compose keeps
       running as 1000; the root path is for platforms like Fly that mount root-owned volumes)
-- [ ] add `"test:docker": "bash scripts/check-docker-image.sh"` to the root `package.json`
-- [ ] run `npm run test:docker` - must pass; run `npm test` and `npm run lint` - must pass before task 2
+- [x] add `"test:docker": "bash scripts/check-docker-image.sh"` to the root `package.json`
+- [x] run `npm run test:docker` - must pass; run `npm test` and `npm run lint` - must pass before task 2
 
 ### Task 2: Take the client address from a trusted platform header (`CLIENT_IP_HEADER`)
 
