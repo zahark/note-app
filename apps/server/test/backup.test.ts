@@ -4,11 +4,12 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import Database from 'better-sqlite3'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { runBackup, UPLOADS_ARCHIVE_NAME } from '../src/cli/backup.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { main as backupMain } from '../src/cli/backup.js'
 import { CliError } from '../src/cli/common.js'
 import { DB_FILE_NAME, openDataDb, type Db } from '../src/db/index.js'
 import { storeUpload, uploadsDir } from '../src/services/attachments.js'
+import { BackupError, runBackup, UPLOADS_ARCHIVE_NAME } from '../src/services/backup.js'
 import { PNG, tmpDataDir } from './helpers/api.js'
 import { seedUser } from './helpers/auth.js'
 
@@ -51,6 +52,7 @@ describe('runBackup', () => {
     expect(result.dir).toBe(path.join(dataDir, 'backups', 'notes-backup-20261112-080509'))
     expect(readdirSync(result.dir).sort()).toEqual([DB_FILE_NAME, UPLOADS_ARCHIVE_NAME])
     expect(result.files).toBe(2)
+    expect(result.uploadBytes).toBe(PNG.length + big.length)
     expect(result.missing).toEqual([])
     // no leftover work directory
     expect(readdirSync(path.join(dataDir, 'backups'))).toEqual(['notes-backup-20261112-080509'])
@@ -89,6 +91,7 @@ describe('runBackup', () => {
 
     expect(path.dirname(result.dir)).toBe(outDir)
     expect(result.files).toBe(1)
+    expect(result.uploadBytes).toBe(PNG.length) // the missing file counts for nothing
     expect(result.missing).toEqual([lost.storage_name])
     expect(tarList(result.archivePath)).toEqual([`uploads/${kept.storage_name}`])
   })
@@ -96,13 +99,14 @@ describe('runBackup', () => {
   it('produces a valid, empty tarball when there are no uploads', async () => {
     const result = await runBackup({ dataDir, now: NOW })
     expect(result.files).toBe(0)
+    expect(result.uploadBytes).toBe(0)
     expect(tarList(result.archivePath)).toEqual([])
   })
 
   it('refuses to run without a database and never overwrites an existing backup', async () => {
     const empty = tmpDataDir()
     try {
-      await expect(runBackup({ dataDir: empty, now: NOW })).rejects.toThrow(CliError)
+      await expect(runBackup({ dataDir: empty, now: NOW })).rejects.toThrow(BackupError)
       expect(existsSync(path.join(empty, 'backups'))).toBe(false)
     } finally {
       rmSync(empty, { recursive: true, force: true })
@@ -111,5 +115,27 @@ describe('runBackup', () => {
     await runBackup({ dataDir, now: NOW })
     await expect(runBackup({ dataDir, now: NOW })).rejects.toThrow(/already exists/)
     expect(readdirSync(path.join(dataDir, 'backups'))).toEqual(['notes-backup-20261112-080509'])
+  })
+})
+
+describe('backup CLI', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('reports a BackupError as a CliError with the same message', async () => {
+    const empty = tmpDataDir()
+    try {
+      vi.stubEnv('DATA_DIR', empty)
+      const err = await backupMain([]).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(CliError)
+      expect((err as Error).message).toBe(`No database at ${path.join(empty, DB_FILE_NAME)} (check DATA_DIR)`)
+    } finally {
+      rmSync(empty, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses extra arguments with its usage line', async () => {
+    await expect(backupMain(['a', 'b'])).rejects.toThrow(CliError)
   })
 })

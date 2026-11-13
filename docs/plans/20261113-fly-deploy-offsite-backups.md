@@ -385,20 +385,20 @@
 - Modify: `apps/server/test/backup.test.ts`
 - Create: `apps/server/test/backup-archive.test.ts`
 
-- [ ] write tests first for the ustar reader (`readUploadsArchive(stream, onEntry)`): round-trips what the
+- [x] write tests first for the ustar reader (`readUploadsArchive(stream, onEntry)`): round-trips what the
       writer produces (several files, empty archive, file sizes on and off the 512-byte boundary); rejects
       entries outside `uploads/`, with `..`, absolute paths, names failing `SAFE_STORAGE_NAME`,
       non-regular entries (directory, symlink, hardlink), duplicate names, truncated archives and bad
       gzip
-- [ ] move `runBackup`, the tar writer, `BLOCK`, `SAFE_STORAGE_NAME` and `UPLOADS_ARCHIVE_NAME` into
+- [x] move `runBackup`, the tar writer, `BLOCK`, `SAFE_STORAGE_NAME` and `UPLOADS_ARCHIVE_NAME` into
       `services/backup.ts`, replacing `CliError` with an exported `BackupError`; make `runBackup` also
       return `uploadBytes` (sum of packed file sizes); `cli/backup.ts` keeps its `main` and maps
       `BackupError` to `CliError`
-- [ ] update `apps/server/test/backup.test.ts`: imports, the no-database assertion
+- [x] update `apps/server/test/backup.test.ts`: imports, the no-database assertion
       (`rejects.toThrow(CliError)` → `BackupError`) and a new assertion on `uploadBytes`; add a test that
       the backup CLI's `main` turns a `BackupError` into a `CliError` with the same message
-- [ ] implement the reader next to the writer
-- [ ] run tests - must pass before task 6
+- [x] implement the reader next to the writer
+- [x] run tests - must pass before task 6
 
 ### Task 6: S3 client for R2 (streamed PUT, streamed GET, list, delete)
 
