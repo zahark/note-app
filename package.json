@@ -18,6 +18,8 @@
     "start": "npm run start -w apps/server",
     "reset-password": "npm run reset-password -w apps/server --",
     "backup": "npm run backup -w apps/server --",
+    "backup:offsite": "npm run backup:offsite -w apps/server --",
+    "restore:offsite": "npm run restore:offsite -w apps/server --",
     "test:e2e": "playwright test",
     "test:docker": "bash scripts/check-docker-image.sh"
   },

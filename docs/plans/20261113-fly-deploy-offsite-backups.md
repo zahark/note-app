@@ -475,11 +475,11 @@
 - Modify: `apps/server/package.json` (scripts `backup:offsite`, `restore:offsite`)
 - Modify: `package.json` (root passthrough scripts, like `backup`)
 
-- [ ] write tests first for `backup:offsite`: reads its settings with `parseOffsiteBackupConfig` and
+- [x] write tests first for `backup:offsite`: reads its settings with `parseOffsiteBackupConfig` and
       `cliDataDir` only (works with no `SESSION_SECRET`/`SHARE_HMAC_KEY`/`PUBLIC_ORIGIN` set), refuses with a
       `CliError` when `BACKUP_S3_*` is not configured, runs one `runOffsiteBackup`, prints the backup
       name, and never writes `offsite-backup.json` and never prunes
-- [ ] write tests first for `restore:offsite <name>` (fake S3 server with backups made by
+- [x] write tests first for `restore:offsite <name>` (fake S3 server with backups made by
       `runOffsiteBackup` from a seeded data dir, env without the server secrets): refuses as root (getuid mocked); rejects a malformed
       name; refuses when `restore/` exists; removes a leftover `restore-staging/`; refuses with the
       extend-the-volume message when free space is short (statfs mocked); a size or SHA-256 mismatch of
@@ -489,9 +489,16 @@
       `restore/notes.db` and `restore/uploads/` with exactly the backup's files, and no tarball on disk;
       a zero-attachment backup stages an empty `restore/uploads/` directory; the staged files and
       directories are fsynced before `READY` is written (spy on `fs.fsync`/`FileHandle.sync`)
-- [ ] implement both CLIs with `runIfInvokedDirectly` and the existing `CliError` conventions (see
+- [x] implement both CLIs with `runIfInvokedDirectly` and the existing `CliError` conventions (see
       Technical Details for the restore steps)
-- [ ] run tests - must pass before task 9
+- [x] run tests - must pass before task 9
+- ➕ deviation: the stage layout names (`restore/`, `restore-staging/`, `restore-previous/`, `READY`) and
+      the `RestoreReady` type already live in `services/restore.ts` (Task 9 adds `applyStagedRestore` there),
+      so the CLI and the startup swap share them without server code importing `cli/`. Both CLIs take
+      `main(args, { env, endpoint })` (backup also `now`): `env` replaces `process.env`, `endpoint` points
+      the parsed https config at the local http fake S3 (tests only); `cliOffsiteConfig` in `cli/common.ts`
+      maps a `ConfigError` or an unconfigured bucket to a `CliError`. `BackupError`/`S3Error` also become
+      `CliError`s. Files are fsynced with `fs.openSync` + `fs.fsyncSync` (the test spies on those)
 
 ### Task 9: Apply a staged restore at startup
 

@@ -9,6 +9,8 @@
     "start": "node dist/index.js",
     "reset-password": "node dist/cli/reset-password.js",
     "backup": "node dist/cli/backup.js",
+    "backup:offsite": "node dist/cli/backupOffsite.js",
+    "restore:offsite": "node dist/cli/restoreOffsite.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
