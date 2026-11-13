@@ -40,7 +40,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const result = await app.auth.signup({
       email,
       password,
-      ip: request.ip,
+      ip: request.clientIp,
       deviceToken: request.cookies[DEVICE_COOKIE],
     })
     setAuthCookies(reply, app.config, result)
@@ -52,7 +52,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const result = await app.auth.login({
       email,
       password,
-      ip: request.ip,
+      ip: request.clientIp,
       deviceToken: request.cookies[DEVICE_COOKIE],
     })
     setAuthCookies(reply, app.config, result)

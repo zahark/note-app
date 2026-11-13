@@ -8,6 +8,9 @@
 #       1000:1000 and the server runs as uid 1000 and answers /api/health
 #   (b) Compose-like: `--user 1000:1000` on a normal named volume -> starts, /data stays 1000:1000
 #   (c) a file created through `docker exec` in (b) is owned by 1000
+#   (d) `docker compose config` resolves CLIENT_IP_HEADER (and, without an override, TRUST_PROXY) to
+#       empty even when .env sets them, so a directly exposed Compose app never trusts a header; it
+#       reads a throwaway project directory with its own .env, never the repo's .env
 #
 # Set KEEP_IMAGE=1 to keep the `notes-app:docker-check` image afterwards (it is removed by default;
 # the build cache keeps rebuilds fast either way).
@@ -20,6 +23,7 @@ FLY_CONTAINER="$PREFIX-fly"
 COMPOSE_VOLUME="$PREFIX-compose"
 COMPOSE_CONTAINER="$PREFIX-compose"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+COMPOSE_DIR=""
 
 # throwaway values: the server refuses to boot without them (secrets must be >= 32 characters)
 APP_ENV=(
@@ -31,6 +35,7 @@ APP_ENV=(
 cleanup() {
   docker rm -f "$FLY_CONTAINER" "$COMPOSE_CONTAINER" >/dev/null 2>&1 || true
   docker volume rm -f "$FLY_VOLUME" "$COMPOSE_VOLUME" >/dev/null 2>&1 || true
+  if [ -n "$COMPOSE_DIR" ]; then rm -rf "$COMPOSE_DIR"; fi
   if [ "${KEEP_IMAGE:-}" != "1" ]; then
     docker image rm "$IMAGE" >/dev/null 2>&1 || true
   fi
@@ -103,5 +108,35 @@ assert_eq "$(server_uid "$COMPOSE_CONTAINER")" "1000" "(b) server process uid"
 echo "== (c) a file created through docker exec in (b)"
 docker exec "$COMPOSE_CONTAINER" touch /data/exec-check
 assert_eq "$(docker exec "$COMPOSE_CONTAINER" stat -c %u /data/exec-check)" "1000" "(c) docker exec file owner"
+
+echo "== (d) Compose pins CLIENT_IP_HEADER empty whatever .env says"
+COMPOSE_DIR="$(mktemp -d)"
+# throwaway values only; this .env also tries to set both client-address settings
+cat >"$COMPOSE_DIR/.env" <<'ENV'
+SESSION_SECRET=docker-check-session-secret-0123456789abcdef
+SHARE_HMAC_KEY=docker-check-share-hmac-key-0123456789abcdef
+PUBLIC_ORIGIN=http://localhost:3000
+CLOUDFLARE_TUNNEL_TOKEN=docker-check-tunnel-token
+CLIENT_IP_HEADER=Fly-Client-IP
+TRUST_PROXY=1
+ENV
+# compose_env <name> [override]: the app service's resolved value of <name>; only that value is
+# printed, never the rest of the resolved config
+compose_env() {
+  local name="$1" files=(-f "$REPO_ROOT/docker-compose.yml")
+  if [ -n "${2:-}" ]; then files+=(-f "$REPO_ROOT/$2"); fi
+  (cd "$COMPOSE_DIR" && docker compose -p "$PREFIX-config" --project-directory "$COMPOSE_DIR" \
+    "${files[@]}" config --format json) |
+    node -e "let s = ''
+      process.stdin.on('data', (c) => (s += c)).on('end', () => {
+        const v = JSON.parse(s).services.app.environment[process.argv[1]]
+        process.stdout.write(v === undefined ? '<unset>' : v)
+      })" "$name"
+}
+assert_eq "$(compose_env CLIENT_IP_HEADER)" "" "(d) CLIENT_IP_HEADER (base)"
+assert_eq "$(compose_env TRUST_PROXY)" "" "(d) TRUST_PROXY (base)"
+for override in compose.direct.yml compose.nginx.yml compose.tunnel.yml; do
+  assert_eq "$(compose_env CLIENT_IP_HEADER "$override")" "" "(d) CLIENT_IP_HEADER ($override)"
+done
 
 echo "docker image check passed"

@@ -181,6 +181,40 @@ describe('loadConfig: TRUST_PROXY', () => {
   )
 })
 
+describe('loadConfig: CLIENT_IP_HEADER', () => {
+  it('unset or empty → null', () => {
+    expect(loadConfig(baseEnv()).clientIpHeader).toBeNull()
+    expect(loadConfig(baseEnv({ CLIENT_IP_HEADER: '' })).clientIpHeader).toBeNull()
+    expect(loadConfig(baseEnv({ CLIENT_IP_HEADER: '  ' })).clientIpHeader).toBeNull()
+  })
+
+  it('accepts a header name and stores it lowercase', () => {
+    expect(loadConfig(baseEnv({ CLIENT_IP_HEADER: 'Fly-Client-IP' })).clientIpHeader).toBe('fly-client-ip')
+    expect(loadConfig(baseEnv({ CLIENT_IP_HEADER: ' X-Real-IP ' })).clientIpHeader).toBe('x-real-ip')
+    expect(loadConfig(baseEnv({ CLIENT_IP_HEADER: 'a'.repeat(64) })).clientIpHeader).toBe('a'.repeat(64))
+  })
+
+  it.each(['Fly_Client_IP', 'Fly-Client-IP:', 'x real ip', 'cf-connecting-ip,fly-client-ip', 'é', 'a'.repeat(65)])(
+    'rejects CLIENT_IP_HEADER=%s',
+    (value) => {
+      expect(() => loadConfig(baseEnv({ CLIENT_IP_HEADER: value }))).toThrow(ConfigError)
+      expect(() => loadConfig(baseEnv({ CLIENT_IP_HEADER: value }))).toThrow('CLIENT_IP_HEADER')
+    },
+  )
+
+  it.each(['1', '10.0.0.0/8'])('rejects it together with TRUST_PROXY=%s', (trust) => {
+    const env = baseEnv({ CLIENT_IP_HEADER: 'Fly-Client-IP', TRUST_PROXY: trust })
+    expect(() => loadConfig(env)).toThrow(ConfigError)
+    expect(() => loadConfig(env)).toThrow(/CLIENT_IP_HEADER and TRUST_PROXY/)
+  })
+
+  it.each(['', '0'])('allows it with TRUST_PROXY=%j (trusts nothing)', (trust) => {
+    const config = loadConfig(baseEnv({ CLIENT_IP_HEADER: 'Fly-Client-IP', TRUST_PROXY: trust }))
+    expect(config.clientIpHeader).toBe('fly-client-ip')
+    expect(config.trustProxy).toBe(false)
+  })
+})
+
 describe('trustProxy wiring into request.ip', () => {
   const ipApp = (trustProxy: Config['trustProxy']) => {
     const db = openDb(':memory:')

@@ -102,7 +102,7 @@ export interface PinShare {
 export interface UnlockInput {
   noteId: string
   pin: string
-  /** Client address (`request.ip`); normalized with `ipKey`. */
+  /** Client address (`request.clientIp`); normalized with `ipKey`. */
   ip: string
 }
 

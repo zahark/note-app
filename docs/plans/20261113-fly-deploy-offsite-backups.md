@@ -316,24 +316,24 @@
 - Modify: `apps/server/test/config.test.ts`
 - Modify: `apps/server/test/client-address.test.ts`
 
-- [ ] write config tests first: unset → `clientIpHeader: null`; valid name accepted (stored lowercase);
+- [x] write config tests first: unset → `clientIpHeader: null`; valid name accepted (stored lowercase);
       invalid characters rejected; set together with a non-empty `TRUST_PROXY` → `ConfigError`
-- [ ] write client-address tests first: with `CLIENT_IP_HEADER=Fly-Client-IP` the debug `client address`
+- [x] write client-address tests first: with `CLIENT_IP_HEADER=Fly-Client-IP` the debug `client address`
       line and the per-IP limit key use the header (IPv4, IPv6, IPv4-mapped IPv6 normalised by
       `ipKey`); a spoofed `X-Forwarded-For` is ignored; a missing or non-IP header value falls back to
       the socket address with a debug-level line only (at `LOG_LEVEL=info`, filtering by `msg` like the
       existing test: no fallback or `client address` entry and no entry at `warn` or above; Fastify's own
       request lines stay as they are); without the setting nothing changes (existing tests)
-- [ ] write a route-level test that two different `Fly-Client-IP` values get separate login limits while
+- [x] write a route-level test that two different `Fly-Client-IP` values get separate login limits while
       the same value shares one
-- [ ] pin `CLIENT_IP_HEADER: ""` in `docker-compose.yml`'s `environment` next to `TRUST_PROXY: ""` (with
+- [x] pin `CLIENT_IP_HEADER: ""` in `docker-compose.yml`'s `environment` next to `TRUST_PROXY: ""` (with
       the same comment: the deployment override decides it), so a value in `.env` can never make a
       directly exposed Compose app trust a client-supplied header; add a check to
       `scripts/check-docker-image.sh` or a config-level test that `docker compose config` resolves it empty
-- [ ] add `clientIpHeader` to the config, decorate the request with `clientIp` (computed once per
+- [x] add `clientIpHeader` to the config, decorate the request with `clientIp` (computed once per
       request in an `onRequest` hook in `buildApp`), and replace `request.ip` in `app.ts`'s debug log,
       `routes/auth.ts` and `routes/shared.ts` with `request.clientIp`
-- [ ] run tests - must pass before task 3
+- [x] run tests - must pass before task 3
 
 ### Task 3: Add `fly.toml` and guard its security invariants
 

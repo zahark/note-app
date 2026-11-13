@@ -23,6 +23,12 @@ export interface Config {
   /** True when PUBLIC_ORIGIN is https, so cookies get the Secure flag. */
   secureCookies: boolean
   trustProxy: TrustProxy
+  /**
+   * Lowercased name of a header set by the platform's proxy on every request (e.g. Fly.io's
+   * `fly-client-ip`); when set, the per-IP limits take the client address from it (see `clientIpOf` in
+   * app.ts). `null` (unset) uses the socket address, or X-Forwarded-For per TRUST_PROXY.
+   */
+  clientIpHeader: string | null
   /** Who may create an account through `POST /api/auth/signup` (see `SignupMode`). */
   signupMode: SignupMode
   /** Absolute path to the directory holding the SQLite database and uploads. */
@@ -121,6 +127,15 @@ const trustProxy = optional(
   }),
 )
 
+const clientIpHeader = optional(
+  z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9-]{1,64}$/, 'CLIENT_IP_HEADER must be a header name (letters, digits and -, at most 64)')
+    .transform((name) => name.toLowerCase())
+    .optional(),
+).transform((v) => v ?? null)
+
 const allowSignup = optional(
   z.enum(['true', 'false', '1', '0'], { error: 'ALLOW_SIGNUP must be true or false (or unset)' }).optional(),
 ).transform((v): SignupMode => (v === undefined ? 'first-user' : v === 'true' || v === '1' ? 'open' : 'closed'))
@@ -154,6 +169,7 @@ const envSchema = z.object({
   SHARE_HMAC_KEY: secret('SHARE_HMAC_KEY'),
   PUBLIC_ORIGIN: publicOrigin,
   TRUST_PROXY: trustProxy,
+  CLIENT_IP_HEADER: clientIpHeader,
   ALLOW_SIGNUP: allowSignup,
   DATA_DIR: optional(z.string().default(DEFAULT_DATA_DIR)),
   HOST: optional(z.string().default('0.0.0.0')),
@@ -173,15 +189,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       const key = i.path.join('.')
       return i.message.startsWith(key) ? i.message : `${key}: ${i.message}`
     })
-    throw new ConfigError(`Invalid configuration:\n  - ${problems.join('\n  - ')}`)
+    throw configError(problems)
   }
   const e = result.data
+  // both name a source of the client address; trusting two would let either one be forged
+  if (e.CLIENT_IP_HEADER !== null && e.TRUST_PROXY !== false) {
+    throw configError([
+      'CLIENT_IP_HEADER and TRUST_PROXY cannot both be set: use CLIENT_IP_HEADER when the platform proxy ' +
+        'sets that header on every request (e.g. Fly.io), TRUST_PROXY otherwise',
+    ])
+  }
   return {
     sessionSecret: e.SESSION_SECRET,
     shareHmacKey: e.SHARE_HMAC_KEY,
     publicOrigin: e.PUBLIC_ORIGIN,
     secureCookies: e.PUBLIC_ORIGIN.startsWith('https:'),
     trustProxy: e.TRUST_PROXY,
+    clientIpHeader: e.CLIENT_IP_HEADER,
     signupMode: e.ALLOW_SIGNUP,
     dataDir: path.resolve(e.DATA_DIR),
     host: e.HOST,
@@ -189,4 +213,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logLevel: e.LOG_LEVEL,
     uploadQuotaMb: e.UPLOAD_QUOTA_MB,
   }
+}
+
+function configError(problems: string[]): ConfigError {
+  return new ConfigError(`Invalid configuration:\n  - ${problems.join('\n  - ')}`)
 }

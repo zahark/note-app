@@ -70,7 +70,7 @@ export async function sharedRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/shared/:id/unlock', async (request) => {
     const { id } = parseParams(idParams, request.params)
     const { pin } = unlockBody.parse(request.body)
-    const { token, expiresAt } = await app.share.unlock({ noteId: id, pin, ip: request.ip })
+    const { token, expiresAt } = await app.share.unlock({ noteId: id, pin, ip: request.clientIp })
     return { token, expires_at: expiresAt }
   })
 

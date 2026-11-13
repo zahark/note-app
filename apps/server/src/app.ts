@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import fastifyStatic from '@fastify/static'
@@ -90,6 +91,31 @@ declare module 'fastify' {
     db: Db
     share: ShareService
   }
+  interface FastifyRequest {
+    /**
+     * The client address the per-IP limits and logs use, computed once per request by `clientIpOf`:
+     * the CLIENT_IP_HEADER value when configured and valid, otherwise `request.ip`.
+     */
+    clientIp: string
+  }
+}
+
+/**
+ * The request's client address. With `config.clientIpHeader` set, that header's value when it is a
+ * single valid IPv4/IPv6 literal; otherwise (unset, missing, repeated or not an IP) `request.ip` (the
+ * socket address, or X-Forwarded-For per TRUST_PROXY). The fallback is logged at debug level only: a
+ * platform's own health checks reach the app without the header, so a warning would fire constantly.
+ */
+export function clientIpOf(request: FastifyRequest, clientIpHeader: string | null): string {
+  if (clientIpHeader === null) return request.ip
+  const value = request.headers[clientIpHeader]
+  const candidate = typeof value === 'string' ? value.trim() : ''
+  if (isIP(candidate) !== 0) return candidate
+  request.log.debug(
+    { header: clientIpHeader, ip: request.ip },
+    'client IP header missing or invalid, using the socket address',
+  )
+  return request.ip
 }
 
 /**
@@ -129,9 +155,12 @@ export function buildApp({
   app.decorate('config', config)
   app.decorate('db', db)
   app.setErrorHandler(errorHandler)
-  // at LOG_LEVEL=debug, shows which address the per-IP limits see, to check TRUST_PROXY per deployment
+  app.decorateRequest('clientIp', '')
+  // computed before every other hook and route; at LOG_LEVEL=debug, shows which address the per-IP
+  // limits see, to check TRUST_PROXY / CLIENT_IP_HEADER per deployment
   app.addHook('onRequest', async (request) => {
-    request.log.debug({ ip: request.ip, ipKey: ipKey(request.ip) }, 'client address')
+    request.clientIp = clientIpOf(request, config.clientIpHeader)
+    request.log.debug({ ip: request.clientIp, ipKey: ipKey(request.clientIp) }, 'client address')
   })
   // no-referrer / noindex / no-store on every public shared API response, errors and 404s included
   app.addHook('onSend', sharedApiHeaders)

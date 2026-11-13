@@ -81,7 +81,7 @@ export interface Credentials {
   /** Normalized (trimmed, lower-cased) email. */
   email: string
   password: string
-  /** Client address (`request.ip`); normalized with `ipKey` for the per-IP limits. */
+  /** Client address (`request.clientIp`); normalized with `ipKey` for the per-IP limits. */
   ip: string
   /** Raw device-cookie value, if the browser sent one. */
   deviceToken?: string | undefined

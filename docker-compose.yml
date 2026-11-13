@@ -27,11 +27,13 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env (openssl rand -hex 32)}
       SHARE_HMAC_KEY: ${SHARE_HMAC_KEY:?set SHARE_HMAC_KEY in .env (openssl rand -hex 32)}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env (e.g. https://notes.example.com)}
-      # fixed inside the container; the deployment override decides TRUST_PROXY
+      # fixed inside the container; the deployment override decides TRUST_PROXY and CLIENT_IP_HEADER
+      # (pinned empty here so a value in .env can never make a directly exposed app trust a header)
       DATA_DIR: /data
       HOST: 0.0.0.0
       PORT: "3000"
       TRUST_PROXY: ""
+      CLIENT_IP_HEADER: ""
     volumes:
       # a named volume (not a bind mount): Docker initialises it from the image's /data, owned by
       # uid/gid 1000. A bind mount must be `chown -R 1000:1000` on the host first.
