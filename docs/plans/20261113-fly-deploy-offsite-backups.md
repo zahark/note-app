@@ -542,17 +542,23 @@
       a rollback that is itself interrupted at any step (both converge)
 
 ### Task 10: Verify acceptance criteria
-- [ ] verify all requirements from Overview are implemented (Fly config, root-owned volume start, client
+- [x] verify all requirements from Overview are implemented (Fly config, root-owned volume start, client
       IP header, daily off-site upload with success-driven retention, restore path, Compose unchanged,
       features off without their settings)
-- [ ] verify edge cases are handled (partial config, failed/aborted uploads, prune after failures,
+- [x] verify edge cases are handled (partial config, failed/aborted uploads, prune after failures,
       short disk on restore, corrupt downloads, unsafe tarball entries, interrupted swap)
-- [ ] run full test suite: `npm test`
-- [ ] run lint and type checks: `npm run lint`
-- [ ] run the Docker check: `npm run test:docker`
-- [ ] run e2e tests: `npm run test:e2e`
-- [ ] verify test coverage of the new modules (config parsing, client IP, s3, backup archive,
+- [x] run full test suite: `npm test`
+- [x] run lint and type checks: `npm run lint`
+- [x] run the Docker check: `npm run test:docker`
+- [x] run e2e tests: `npm run test:e2e`
+- [x] verify test coverage of the new modules (config parsing, client IP, s3, backup archive,
       offsiteBackup, CLIs, restore)
+- ➕ verification note: no gaps found, no code changed. Results: `npm test` (server 918, web 326 tests),
+      `npm run lint`, `npm run test:docker` and `npm run test:e2e` all pass. Also probed the image in a
+      throwaway root-started container on a `volume-nocopy` volume: `npm run restore:offsite` as root
+      refuses and names the `setpriv` prefix; `setpriv --reuid=1000 --regid=1000 --clear-groups npm run
+      backup|backup:offsite|restore:offsite` runs as uid 1000 (HOME=/root does not break npm), writes
+      1000-owned files, and the off-site CLIs report the missing `BACKUP_S3_*` settings by name
 
 ### Task 11: [Final] Update documentation
 - [ ] README: a "Deploying to Fly.io" section: install `flyctl`; `fly launch --copy-config --no-deploy
