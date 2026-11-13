@@ -7,6 +7,7 @@ import { AttachmentImage } from './AttachmentImage'
 import type { AttachmentResolver } from './attachmentRef'
 import { LinkShortcuts } from './links'
 import type { PdfPreviewErrorHandler } from './PdfViewer'
+import { AutoTextDirection } from './textDirection'
 
 export interface EditorExtensionOptions {
   /** Maps `attachment://<aid>` to a loadable URL inside the image and file node views. */
@@ -25,7 +26,8 @@ export interface EditorExtensionOptions {
  * includes links), task lists (`[ ] `), `attachment://` images and `attachment://` files (PDF, GPX).
  * Links never open on a plain click while editing (that places the cursor; the owner's `LinkPopover`
  * offers Open), but do on Cmd/Ctrl+click (`LinkShortcuts`); in the read-only shared view a plain
- * click follows the link's `target="_blank"`.
+ * click follows the link's `target="_blank"`. Each block runs left-to-right or right-to-left by its
+ * first letter (`AutoTextDirection`).
  */
 export function editorExtensions({
   resolveAttachment,
@@ -43,6 +45,7 @@ export function editorExtensions({
       },
     }),
     LinkShortcuts,
+    AutoTextDirection,
     TaskList,
     TaskItem.configure({ nested: true }),
     AttachmentImage.configure({ resolveAttachment }),

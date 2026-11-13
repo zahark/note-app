@@ -16,6 +16,9 @@ serves the API and the built SPA, and all state lives in one data directory.
   **Link** button; with nothing selected, **Link** inserts the address you type. Clicking a link places the cursor and shows a small popup with its URL and **Open** (new tab), **Edit** and
   **Remove**; Cmd+click (macOS) / Ctrl+click opens it directly. Only http, https and mailto links are
   ever opened. In shared notes a plain click opens a link in a new tab.
+  Hebrew (or any right-to-left) text: each paragraph, heading, list item and quote runs and aligns
+  by its first letter, so a line that starts in Hebrew sits on the right and one that starts in
+  English on the left; code blocks stay left-to-right.
 - File attachments by the toolbar's **Attach file** button, drag or paste (the server checks each
   file's content, never its name or declared type):
   - **PDF** (25 MB max): a small in-note viewer (one page at a time, previous/next, "page i of n") plus

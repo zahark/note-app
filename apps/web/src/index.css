@@ -146,13 +146,13 @@
     @apply text-lg font-semibold;
   }
   .note-content ul {
-    @apply list-disc pl-6;
+    @apply list-disc ps-6;
   }
   .note-content ol {
-    @apply list-decimal pl-6;
+    @apply list-decimal ps-6;
   }
   .note-content ul[data-type="taskList"] {
-    @apply list-none pl-0;
+    @apply list-none ps-0;
   }
   .note-content ul[data-type="taskList"] li {
     @apply flex items-start gap-2;
@@ -164,7 +164,7 @@
     @apply min-w-0 flex-1;
   }
   .note-content blockquote {
-    @apply border-l-4 pl-4 text-muted-foreground;
+    @apply border-s-4 ps-4 text-muted-foreground;
   }
   .note-content code {
     @apply rounded bg-muted px-1 py-0.5 font-mono text-sm;
@@ -212,7 +212,7 @@
     @apply hidden;
   }
   .note-content p.is-editor-empty:first-child::before {
-    @apply pointer-events-none float-left h-0 text-muted-foreground/60;
+    @apply pointer-events-none float-start h-0 text-muted-foreground/60;
     content: attr(data-placeholder);
   }
 }
