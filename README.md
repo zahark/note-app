@@ -18,7 +18,10 @@ serves the API and the built SPA, and all state lives in one data directory.
   ever opened. In shared notes a plain click opens a link in a new tab.
   Hebrew (or any right-to-left) text: each paragraph, heading, list item and quote runs and aligns
   by its first letter, so a line that starts in Hebrew sits on the right and one that starts in
-  English on the left; code blocks stay left-to-right.
+  English on the left; code blocks stay left-to-right. When the first letter guesses wrong (a Hebrew
+  sentence that starts with an English word), the toolbar's **Right-to-left** / **Left-to-right**
+  buttons force the direction of the paragraph or list item; press the lit button again to go back
+  to automatic.
 - File attachments by the toolbar's **Attach file** button, drag or paste (the server checks each
   file's content, never its name or declared type):
   - **PDF** (25 MB max): a small in-note viewer (one page at a time, previous/next, "page i of n") plus
