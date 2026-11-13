@@ -507,7 +507,7 @@
 - Create: `apps/server/test/restore.test.ts`
 - Modify: `apps/server/src/index.ts`
 
-- [ ] write tests first: no `restore/` → nothing happens; a staged restore (built by the Task 8 CLI)
+- [x] write tests first: no `restore/` → nothing happens; a staged restore (built by the Task 8 CLI)
       replaces `notes.db` and `uploads/`, moves the old `notes.db`, WAL, SHM and `uploads/` aside and
       deletes them only at the end, removes `restore/`, and the database then opens with the backed-up
       notes (no old WAL replayed); `restore/` without `READY` is deleted together with a leftover
@@ -516,22 +516,30 @@
       `READY` but no `uploads/` directory, or a `notes.db` whose size differs from `READY`, stops startup
       with an error and changes nothing; a zero-attachment backup (empty `uploads/` stage) restores over
       live data that has uploads, leaving an empty live `uploads/`
-- [ ] write crash-recovery tests first, each in three starting layouts (old data with `uploads/` and a
+- [x] write crash-recovery tests first, each in three starting layouts (old data with `uploads/` and a
       WAL; old data without `uploads/`; no old data at all, the fresh-app disaster case): for each step
       of the swap and of the cleanup, simulate an interruption after it (inject a failure via a test
       hook), then call `applyStagedRestore` again → the same end state as an uninterrupted run, every
       restored file present, and never a state where neither the old nor the restored database exists
-- [ ] write abort tests first: interrupt the swap at each step (including with a zero-attachment stage
+- [x] write abort tests first: interrupt the swap at each step (including with a zero-attachment stage
       over live uploads), then apply with `abort: true` → the original data (db, WAL, uploads) is live
       and intact, `restore-previous/` and `restore/` are gone; a following start without `abort` changes
       nothing
-- [ ] write a two-restores test: interrupt the first restore during the `restore-previous/` delete,
+- [x] write a two-restores test: interrupt the first restore during the `restore-previous/` delete,
       start, stage a second restore with the CLI, apply → the second backup is live and nothing from the
       first run's leftovers is mixed in
-- [ ] implement `applyStagedRestore(dataDir, { abort, log })` per Technical Details
-- [ ] call it in `index.ts` before `openDataDb` with `config.restoreAbort`; an error stops startup with
+- [x] implement `applyStagedRestore(dataDir, { abort, log })` per Technical Details
+- [x] call it in `index.ts` before `openDataDb` with `config.restoreAbort`; an error stops startup with
       the message and the `RESTORE_ABORT` hint
-- [ ] run tests - must pass before task 10
+- [x] run tests - must pass before task 10
+- ➕ deviation: `applyStagedRestore` returns `none | cleaned | restored | discarded` and takes an
+      `afterStep` test seam (called after every change on disk; throwing from it simulates a crash). Every
+      rename fsyncs both parent directories; directories are deleted one entry at a time (each a step);
+      the rollback removes `restore-previous/` with a non-recursive `rmdir`, so leftovers fail loudly instead
+      of deleting old data. All errors are wrapped in `RestoreError` carrying the `RESTORE_ABORT` hint. Its
+      few log lines go to the console (`index.ts` calls it before the app and its logger exist). `fsyncPath`
+      moved from the CLI into `services/restore.ts` and is shared. Extra tests: two crashes in a row, and
+      a rollback that is itself interrupted at any step (both converge)
 
 ### Task 10: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented (Fly config, root-owned volume start, client

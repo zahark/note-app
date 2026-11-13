@@ -24,6 +24,7 @@ import {
   type OffsiteManifest,
 } from '../services/offsiteBackup.js'
 import {
+  fsyncPath,
   RESTORE_DIR,
   RESTORE_PREVIOUS_DIR,
   RESTORE_READY_FILE,
@@ -60,16 +61,6 @@ const manifestSchema = z.object({
 type BackupFile = typeof DB_FILE_NAME | typeof UPLOADS_ARCHIVE_NAME
 
 const formatMib = (bytes: number) => `${(bytes / MIB).toFixed(1)} MiB`
-
-/** fsync of a file or directory, so a rename or a crash never exposes data still in the page cache. */
-function fsyncPath(target: string): void {
-  const fd = fs.openSync(target, 'r')
-  try {
-    fs.fsyncSync(fd)
-  } finally {
-    fs.closeSync(fd)
-  }
-}
 
 /** Downloads a small object whole, refusing anything over `max` bytes. */
 async function downloadSmall(cfg: OffsiteBackupConfig, key: string, max: number, what: string): Promise<Buffer> {

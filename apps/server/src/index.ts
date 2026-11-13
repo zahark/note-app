@@ -5,6 +5,7 @@ import { buildApp, defaultWebDir } from './app.js'
 import { ConfigError, loadConfig, type Config } from './config.js'
 import { openDataDb } from './db/index.js'
 import { offsiteBackupTarget } from './services/offsiteBackup.js'
+import { applyStagedRestore, RestoreError } from './services/restore.js'
 import { HOUR_MS } from './units.js'
 
 async function main(): Promise<void> {
@@ -13,6 +14,21 @@ async function main(): Promise<void> {
     config = loadConfig()
   } catch (err) {
     if (err instanceof ConfigError) {
+      console.error(err.message)
+      process.exit(1)
+    }
+    throw err
+  }
+
+  // a restore staged by `restore:offsite` is swapped in (or, with RESTORE_ABORT, discarded) before the
+  // database opens; the app logger does not exist yet, so these few lines go to the console
+  try {
+    applyStagedRestore(config.dataDir, {
+      abort: config.restoreAbort,
+      log: { info: (message) => console.log(message), warn: (message) => console.warn(message) },
+    })
+  } catch (err) {
+    if (err instanceof RestoreError) {
       console.error(err.message)
       process.exit(1)
     }
