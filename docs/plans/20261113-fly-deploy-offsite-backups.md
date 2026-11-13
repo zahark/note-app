@@ -407,18 +407,25 @@
 - Create: `apps/server/src/services/s3.ts`
 - Create: `apps/server/test/s3.test.ts`
 
-- [ ] write tests first against a local HTTP server playing S3: PUT sends path-style
+- [x] write tests first against a local HTTP server playing S3: PUT sends path-style
       `/<bucket>/<encoded key>`, `content-length` equal to the file size, `x-amz-content-sha256:
       UNSIGNED-PAYLOAD`, an `AWS4-HMAC-SHA256` `authorization` with the access key id and region, and the
       exact file bytes (including a multi-MB file); GET streams the body; list follows continuation
       tokens and unescapes keys; delete treats 204/404 as success
-- [ ] write error tests: 403 with an S3 XML error → `S3Error` with status, code and message (no
+- [x] write error tests: 403 with an S3 XML error → `S3Error` with status, code and message (no
       credentials or signature in the message); 404 on GET → `NoSuchKey`; connection refused; a server
       that hangs → timeout; `AbortSignal` aborts each call; a file > 5 GiB refused before any request
       (stat mocked)
-- [ ] add `aws4fetch` and implement `putObjectFromFile`, `getObjectStream`, `listObjects`,
+- [x] add `aws4fetch` and implement `putObjectFromFile`, `getObjectStream`, `listObjects`,
       `deleteObject` (see Technical Details)
-- [ ] run tests - must pass before task 7
+- [x] run tests - must pass before task 7
+- ➕ deviation: `getObjectStream` signs with `AwsV4Signer` and sends through the same `node:http(s)`
+      path as the PUT (not `AwsClient.fetch`), so every call shares the 60 s connect/idle timeout and the
+      GET body is a native `IncomingMessage`; `S3Target` gained an optional `timeoutMs` (default 60 s) so
+      tests can time out a hanging server quickly; local failures (timeout, file > 5 GiB, unsafe key,
+      unreadable listing) are `S3Error`s with status 0 and codes `Timeout`, `EntityTooLarge`,
+      `InvalidKey`, `InvalidResponse`
+
 
 ### Task 7: Daily off-site backup job, state file and retention
 
