@@ -83,6 +83,46 @@ describe('applyLinkHref / removeLink', () => {
     expect(editor.getText()).toBe('See docs here')
   })
 
+  it('with only a cursor outside a link, inserts the typed address as a link', () => {
+    const editor = makeEditor(linked())
+    act(() => {
+      editor.commands.setTextSelection(4) // after "See", before the space
+      applyLinkHref(editor, ' example.org ')
+    })
+    expect(links(editor.getJSON())).toEqual([
+      ['example.org', 'https://example.org'],
+      ['docs', HREF],
+    ])
+    expect(editor.getText()).toBe('Seeexample.org docs here')
+    // typing on after the inserted link does not extend it
+    act(() => {
+      editor.commands.insertContent('!')
+    })
+    expect(links(editor.getJSON())).toEqual([
+      ['example.org', 'https://example.org'],
+      ['docs', HREF],
+    ])
+
+    // an empty value with no link under the cursor changes nothing
+    act(() => {
+      editor.commands.setTextSelection(1)
+      applyLinkHref(editor, '')
+    })
+    expect(editor.getText()).toBe('Seeexample.org! docs here')
+  })
+
+  it('links a selection that is not yet a link', () => {
+    const editor = makeEditor(linked())
+    act(() => {
+      editor.commands.setTextSelection({ from: 1, to: 4 }) // "See"
+      applyLinkHref(editor, 'example.org')
+    })
+    expect(links(editor.getJSON())).toEqual([
+      ['See', 'https://example.org'],
+      ['docs', HREF],
+    ])
+  })
+
   it('removeLink unsets the link and keeps the text', () => {
     const editor = makeEditor(linked())
     act(() => {

@@ -33,11 +33,21 @@ export function normalizeHref(input: string): string {
 
 /**
  * Sets the link under the cursor (the whole link, or the selection when there is none) to `input`;
- * an empty value removes the link and keeps its text. Shared by the toolbar's Link button and the
- * link popover's Edit.
+ * an empty value removes the link and keeps its text. With only a cursor outside any link, the typed
+ * address is inserted as the link's text (a bare `setLink` there would only arm a stored mark and
+ * show nothing). Shared by the toolbar's Link button and the link popover's Edit.
  */
 export function applyLinkHref(editor: Editor, input: string): void {
   const href = normalizeHref(input)
+  if (href !== '' && editor.state.selection.empty && !editor.isActive('link')) {
+    editor
+      .chain()
+      .focus()
+      .insertContent({ type: 'text', text: input.trim(), marks: [{ type: 'link', attrs: { href } }] })
+      .unsetMark('link') // typing on after it does not extend the link
+      .run()
+    return
+  }
   const chain = editor.chain().focus().extendMarkRange('link')
   if (href === '') chain.unsetLink().run()
   else chain.setLink({ href }).run()
