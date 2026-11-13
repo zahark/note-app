@@ -7,7 +7,8 @@
 // Taking the database first and the files second is what keeps the pair consistent: every attachment row
 // in the copy had its file fully written before the row was inserted, and the only files that can vanish
 // afterwards are ones the sweep deletes, which by then have no references. Needs only DATA_DIR.
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -100,14 +101,17 @@ export interface UploadsArchiveSource {
   file: string
 }
 
-/** Streams a tar archive of `entries`, one file in memory at a time; counts the packed bytes. */
+/**
+ * Streams a tar archive of `entries`, one file in memory at a time (read asynchronously, so a scheduled
+ * backup in the server never blocks requests while it reads attachments); counts the packed bytes.
+ */
 async function* tarStream(
   entries: UploadsArchiveSource[],
   mtime: number,
   counter: { bytes: number },
 ): AsyncGenerator<Buffer> {
   for (const { storageName, file } of entries) {
-    const data = readFileSync(file)
+    const data = await readFile(file)
     counter.bytes += data.length
     yield tarHeader(`${ARCHIVE_DIR}${storageName}`, data.length, mtime)
     yield data
@@ -337,7 +341,8 @@ export async function runBackup({ dataDir, outDir, now = new Date() }: BackupOpt
     let storageNames: string[]
     const copy = new Database(dbPath)
     try {
-      // a single self-contained file: no -wal/-shm next to the copy
+      // a single self-contained file: no -wal/-shm next to the copy. The integrity check is synchronous:
+      // in the server's scheduled backup it pauses requests for about as long as reading the database once
       copy.pragma('journal_mode = DELETE')
       const check = copy.pragma('integrity_check', { simple: true })
       if (check !== 'ok') throw new BackupError(`Backup copy failed its integrity check: ${String(check)}`)

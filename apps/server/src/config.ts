@@ -1,7 +1,7 @@
 import { isIP } from 'node:net'
 import path from 'node:path'
 import { z } from 'zod'
-import { HOUR_SEC, SECOND_MS } from './units.js'
+import { HOUR_MS } from './units.js'
 
 /** DATA_DIR when unset, resolved against the working directory. */
 export const DEFAULT_DATA_DIR = './data'
@@ -357,7 +357,7 @@ function offsiteBackupFrom(e: z.output<typeof offsiteBackupEnvSchema>): OffsiteB
     secretAccessKey,
     region: e.BACKUP_S3_REGION,
     prefix: e.BACKUP_S3_PREFIX,
-    intervalMs: e.BACKUP_INTERVAL_HOURS * HOUR_SEC * SECOND_MS,
+    intervalMs: e.BACKUP_INTERVAL_HOURS * HOUR_MS,
     keepDays: e.BACKUP_KEEP_DAYS,
   }
 }

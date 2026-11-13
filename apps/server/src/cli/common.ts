@@ -23,6 +23,22 @@ export class CliError extends Error {
   }
 }
 
+/** What runs a command as the app user over `fly ssh console` (which logs in as root). */
+export const FLY_APP_USER_PREFIX = 'setpriv --reuid=1000 --regid=1000 --clear-groups npm --prefix /app/apps/server run'
+
+/**
+ * Refuses to run as root: files written into DATA_DIR (a staged restore, a SQLite WAL next to the live
+ * database) must belong to the app user (uid 1000), or the server cannot use them. `command` is the npm
+ * script with its arguments, for the hint.
+ */
+export function refuseRoot(command: string): void {
+  if (process.getuid?.() !== 0) return
+  throw new CliError(
+    'Refusing to run as root: files it writes into DATA_DIR must belong to the app user (uid 1000). Run instead:\n' +
+      `  ${FLY_APP_USER_PREFIX} ${command}`,
+  )
+}
+
 /** What the off-site CLIs read from outside; the defaults are what an operator gets. */
 export interface OffsiteCliOptions {
   /** Where DATA_DIR and the BACKUP_* settings come from (default `process.env`). */

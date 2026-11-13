@@ -200,11 +200,12 @@
     `content-type`, `content-length`, `x-amz-content-sha256: UNSIGNED-PAYLOAD`) → stream the file →
     2xx resolves, else `S3Error(status, code, message)` parsed from the XML error body (first 2 KB);
     connect/idle timeout 60 s; files > 5 GiB refused before any request
-  - `getObjectStream(target, key, signal)`: signed GET via `aws4fetch`'s `AwsClient.fetch`, returns the
-    body as a Node `Readable` plus `content-length`; 404 → `S3Error` code `NoSuchKey`
-  - `listObjects(target, prefix, signal)`: ListObjectsV2 with continuation tokens; returns
-    `{ key, size, lastModified }[]` (parse `<Contents>`, `<IsTruncated>`, `<NextContinuationToken>`;
-    keys are XML-unescaped)
+  - `getObjectStream(target, key, signal)`: GET signed with `aws4fetch`'s `AwsV4Signer` and sent with
+    `node:http(s)` (as implemented; the same path and timeout as the PUT), returns the response as a Node
+    `Readable` plus `content-length`; 404 → `S3Error` code `NoSuchKey`
+  - `listObjects(target, prefix, signal)`: ListObjectsV2 with continuation tokens; returns the keys
+    (parse `<Contents>`, `<IsTruncated>`, `<NextContinuationToken>`; keys are XML-unescaped; as
+    implemented after review, size and date are not read, so an odd entry cannot stop a prune)
   - `deleteObject(target, key, signal)`: signed DELETE; 204/200/404 all count as deleted
   - keys are built only from the validated prefix, backup names matching
     `^notes-backup-\d{8}-\d{6}$` and fixed file names - never user input
@@ -266,8 +267,9 @@
   `util-linux` in `node:22-slim` (verify; install it in the runtime stage otherwise). The Dockerfile keeps
   creating `/data` owned by 1000 (Compose named volumes still inherit it).
 - **Running CLIs on Fly**: `fly ssh console` is root, so documented commands run as the app user:
-  `fly ssh console -C "setpriv --reuid=1000 --regid=1000 --clear-groups npm run restore:offsite -- <name>"`
-  (the same prefix for `backup:offsite` and `backup`), so every file stays owned by 1000.
+  `fly ssh console -C "setpriv --reuid=1000 --regid=1000 --clear-groups npm --prefix /app/apps/server run restore:offsite -- <name>"`
+  (the same prefix for `backup:offsite` and `backup`; `--prefix` because the session's working directory
+  is not guaranteed to be the image's `WORKDIR`), so every file stays owned by 1000.
 
 ## What Goes Where
 - **Implementation Steps** (`[ ]` checkboxes): image/entrypoint, client IP header, `fly.toml`, config,

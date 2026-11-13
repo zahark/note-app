@@ -27,12 +27,6 @@ export interface S3Target {
   timeoutMs?: number
 }
 
-export interface S3Object {
-  key: string
-  size: number
-  lastModified: Date
-}
-
 /** Largest object a single PUT may upload (the S3/R2 limit). */
 export const MAX_PUT_BYTES = 5 * 1024 * MIB
 
@@ -257,19 +251,15 @@ export async function getObjectStream(
   return { body: res, contentLength: Number.isSafeInteger(length) && length >= 0 ? length : null }
 }
 
-function parseObject(block: string): S3Object {
+function parseKey(block: string): string {
   const key = xmlText(block, 'Key')
-  const size = Number(xmlText(block, 'Size'))
-  const lastModified = new Date(xmlText(block, 'LastModified') ?? '')
-  if (key === undefined || !Number.isSafeInteger(size) || size < 0 || Number.isNaN(lastModified.getTime())) {
-    throw new S3Error(0, 'InvalidResponse', 'unreadable entry in an object listing')
-  }
-  return { key, size, lastModified }
+  if (key === undefined) throw new S3Error(0, 'InvalidResponse', 'object listing entry without a key')
+  return key
 }
 
-/** Every object under `prefix` (ListObjectsV2, following continuation tokens). */
-export async function listObjects(target: S3Target, prefix: string, signal?: AbortSignal): Promise<S3Object[]> {
-  const objects: S3Object[] = []
+/** The key of every object under `prefix` (ListObjectsV2, following continuation tokens). */
+export async function listObjects(target: S3Target, prefix: string, signal?: AbortSignal): Promise<string[]> {
+  const keys: string[] = []
   let token: string | undefined
   for (;;) {
     const query: Record<string, string> = { 'list-type': '2', prefix }
@@ -277,8 +267,8 @@ export async function listObjects(target: S3Target, prefix: string, signal?: Abo
     const res = await send(target, { method: 'GET', url: bucketUrl(target, query), signal })
     if (!isSuccess(res)) throw await responseError(res)
     const xml = await readBody(res, LIST_BODY_BYTES)
-    objects.push(...xmlBlocks(xml, 'Contents').map(parseObject))
-    if (xmlText(xml, 'IsTruncated')?.trim() !== 'true') return objects
+    keys.push(...xmlBlocks(xml, 'Contents').map(parseKey))
+    if (xmlText(xml, 'IsTruncated')?.trim() !== 'true') return keys
     const next = xmlText(xml, 'NextContinuationToken')
     if (!next || next === token) {
       throw new S3Error(0, 'InvalidResponse', 'truncated object listing without a new continuation token')

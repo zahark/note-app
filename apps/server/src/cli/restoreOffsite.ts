@@ -25,7 +25,9 @@ import {
 } from '../services/offsiteBackup.js'
 import {
   fsyncPath,
+  liveRestoreLockHolder,
   RESTORE_DIR,
+  RESTORE_LOCK_FILE,
   RESTORE_PREVIOUS_DIR,
   RESTORE_READY_FILE,
   RESTORE_STAGING_DIR,
@@ -33,10 +35,16 @@ import {
 } from '../services/restore.js'
 import { getObjectStream, S3Error } from '../services/s3.js'
 import { KIB, MIB } from '../units.js'
-import { CliError, cliDataDir, cliOffsiteConfig, runIfInvokedDirectly, type OffsiteCliOptions } from './common.js'
+import {
+  CliError,
+  cliDataDir,
+  cliOffsiteConfig,
+  refuseRoot,
+  runIfInvokedDirectly,
+  type OffsiteCliOptions,
+} from './common.js'
 
 const USAGE = 'Usage: npm run restore:offsite -- <notes-backup-YYYYMMDD-HHMMSS>'
-const SETPRIV = 'setpriv --reuid=1000 --regid=1000 --clear-groups'
 /** A manifest is a few hundred bytes; anything this large is not one. */
 const MAX_MANIFEST_BYTES = 64 * KIB
 /** Free space required on top of the restored files. */
@@ -62,27 +70,20 @@ type BackupFile = typeof DB_FILE_NAME | typeof UPLOADS_ARCHIVE_NAME
 
 const formatMib = (bytes: number) => `${(bytes / MIB).toFixed(1)} MiB`
 
-/** Downloads a small object whole, refusing anything over `max` bytes. */
-async function downloadSmall(cfg: OffsiteBackupConfig, key: string, max: number, what: string): Promise<Buffer> {
-  const { body, contentLength } = await getObjectStream(cfg, key)
-  const tooLarge = () => new CliError(`${what} is larger than ${max} bytes; not a backup manifest`)
-  if (contentLength !== null && contentLength > max) {
-    body.destroy()
-    throw tooLarge()
-  }
+/** Fetches and validates `<name>/manifest.json` (anything over `MAX_MANIFEST_BYTES` is refused). */
+async function fetchManifest(cfg: OffsiteBackupConfig, name: string): Promise<OffsiteManifest> {
+  const { body } = await getObjectStream(cfg, backupKey(cfg, name, MANIFEST_NAME))
   const chunks: Buffer[] = []
   let total = 0
   for await (const chunk of body as AsyncIterable<Buffer>) {
     total += chunk.length
-    if (total > max) throw tooLarge() // leaving the loop destroys the body
+    if (total > MAX_MANIFEST_BYTES) {
+      // leaving the loop destroys the body
+      throw new CliError(`${MANIFEST_NAME} is larger than ${MAX_MANIFEST_BYTES} bytes; not a backup manifest`)
+    }
     chunks.push(chunk)
   }
-  return Buffer.concat(chunks)
-}
-
-/** Fetches and validates `<name>/manifest.json`. */
-async function fetchManifest(cfg: OffsiteBackupConfig, name: string): Promise<OffsiteManifest> {
-  const raw = await downloadSmall(cfg, backupKey(cfg, name, MANIFEST_NAME), MAX_MANIFEST_BYTES, MANIFEST_NAME)
+  const raw = Buffer.concat(chunks)
   let json: unknown
   try {
     json = JSON.parse(raw.toString('utf8'))
@@ -136,18 +137,14 @@ class Verifier extends Transform {
   }
 }
 
-/** Starts a download and refuses it early when its `Content-Length` already disagrees with the manifest. */
+/** Starts a download; the `Verifier` enforces the manifest's size and SHA-256 on what arrives. */
 async function openDownload(
   cfg: OffsiteBackupConfig,
   name: string,
   file: BackupFile,
   expected: FileDigest,
 ): Promise<{ body: Readable; verifier: Verifier }> {
-  const { body, contentLength } = await getObjectStream(cfg, backupKey(cfg, name, file))
-  if (contentLength !== null && contentLength !== expected.size) {
-    body.destroy()
-    throw new CliError(`${file} is ${contentLength} bytes, the manifest says ${expected.size}`)
-  }
+  const { body } = await getObjectStream(cfg, backupKey(cfg, name, file))
   return { body, verifier: new Verifier(file, expected) }
 }
 
@@ -243,14 +240,33 @@ async function stage(cfg: OffsiteBackupConfig, dataDir: string, name: string): P
   return manifest
 }
 
+/**
+ * Takes `restore-staging.lock` for this run (refused while another run holds it; a lock left by a killed run
+ * is taken over) and returns its release.
+ */
+function lockStaging(dataDir: string): () => void {
+  const lock = path.join(dataDir, RESTORE_LOCK_FILE)
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' })
+      return () => fs.rmSync(lock, { force: true })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+      const holder = liveRestoreLockHolder(dataDir)
+      if (holder !== null || attempt > 0) {
+        throw new CliError(
+          `Another restore:offsite${holder === null ? '' : ` (pid ${holder})`} is staging a backup in ${dataDir}; ` +
+            `wait for it to finish. If none is running, delete ${lock}.`,
+        )
+      }
+      fs.rmSync(lock, { force: true }) // left by a run that was killed
+    }
+  }
+}
+
 /** The CLI (exported for tests): expected failures are `CliError`s; any failure leaves no stage behind. */
 export async function main(args: string[], options: OffsiteCliOptions = {}): Promise<void> {
-  if (process.getuid?.() === 0) {
-    throw new CliError(
-      'Refusing to run as root: the restored files must belong to the app user (uid 1000). Run instead:\n' +
-        `  ${SETPRIV} npm run restore:offsite -- <name>`,
-    )
-  }
+  refuseRoot('restore:offsite -- <name>')
   const [name, ...rest] = args
   if (name === undefined || rest.length > 0) throw new CliError(USAGE)
   if (backupNameTime(name) === null) {
@@ -268,19 +284,25 @@ export async function main(args: string[], options: OffsiteCliOptions = {}): Pro
     )
   }
   const staging = path.join(dataDir, RESTORE_STAGING_DIR)
-  // leftovers: an interrupted earlier run, and (with no restore/) the end of a finished swap's cleanup
-  await fsp.rm(staging, { recursive: true, force: true })
-  await fsp.rm(path.join(dataDir, RESTORE_PREVIOUS_DIR), { recursive: true, force: true })
-
+  const unlock = lockStaging(dataDir)
   let manifest: OffsiteManifest
   try {
+    // leftovers: an interrupted earlier run, and (with no restore/) the end of a finished swap's cleanup
+    await fsp.rm(staging, { recursive: true, force: true })
+    await fsp.rm(path.join(dataDir, RESTORE_PREVIOUS_DIR), { recursive: true, force: true })
     manifest = await stage(cfg, dataDir, name)
   } catch (err) {
     await fsp.rm(staging, { recursive: true, force: true })
     if (err instanceof CliError) throw err
     if (err instanceof BackupError) throw new CliError(`${name}: ${err.message}`)
     if (err instanceof S3Error) throw new CliError(`${name}: download failed: ${err.message}`)
+    // a connection reset mid-download, a full disk, ...: system errors are expected too
+    if (typeof (err as NodeJS.ErrnoException).code === 'string') {
+      throw new CliError(`${name}: staging failed: ${(err as Error).message}`)
+    }
     throw err
+  } finally {
+    unlock()
   }
 
   if (manifest.missing.length > 0) {
@@ -289,7 +311,7 @@ export async function main(args: string[], options: OffsiteCliOptions = {}): Pro
   console.log(
     `Backup ${name} is verified and staged in ${restoreDir} ` +
       `(${DB_FILE_NAME} ${manifest.files['notes.db'].size} bytes, ${manifest.uploads.count} attachment files).\n` +
-      'Restart the app to apply it (on Fly.io: fly machine restart). ' +
+      'Restart the app to apply it (on Fly.io: fly machine restart <machine-id>; fly machine list shows the id). ' +
       'To discard it instead, start the app once with RESTORE_ABORT=1.',
   )
 }

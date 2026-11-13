@@ -131,20 +131,20 @@ validates them at boot and refuses to start on any problem, listing every one.
 | `TRUST_PROXY` | unset (trust nothing) | Hop count (`1`) or comma-separated proxy IPs/CIDRs; `0` is the same as unset and a bare `true` is rejected. Set it only when the app port is reachable solely through that proxy. |
 | `CLIENT_IP_HEADER` | unset | Name of a header the platform's proxy sets to the client address on every request (`Fly-Client-IP` on Fly.io; `fly.toml` sets it). The per-IP rate limits then use its value; a missing or invalid value falls back to the socket address. Same rule as `TRUST_PROXY`: set it only when the app is reachable solely through that proxy. Setting both is a config error. Docker Compose pins it empty. |
 | `ALLOW_SIGNUP` | unset (first account only) | Who can sign up. Unset: only while no account exists, so the owner can create theirs on first run; after that signup is closed. `true`/`1`: anyone, any time (more accounts). `false`/`0`: nobody, not even on an empty database (the owner must already exist, e.g. restored from a backup). Any other value refuses to boot. The sign-in page offers "Create one" only while signup is open. |
-| `DATA_DIR` | `./data` | Holds `notes.db` and `uploads/`. A relative path resolves against the server's working directory (`apps/server` when run through npm). Docker always uses `/data`. |
+| `DATA_DIR` | `./data` | Holds `notes.db` and `uploads/` (plus `offsite-backup.json` with off-site backups on, and `restore*` folders while a restore is staged or applied). A relative path resolves against the server's working directory (`apps/server` when run through npm). Docker always uses `/data`. |
 | `HOST` | `0.0.0.0` | Listen address. |
 | `PORT` | `3000` | Listen port. |
 | `LOG_LEVEL` | `info` | `fatal` … `trace`; `debug` logs each request's client address and rate-limit IP key. |
 | `UPLOAD_QUOTA_MB` | `1024` | Most attachment storage (images, PDF and GPX files together) one account may use, in MB (integer; `0` = no limit). Uploads past it get 413 `QUOTA_EXCEEDED`. Removed attachments still count until the sweep deletes them, 7 days after removal. |
 | `BACKUP_S3_ENDPOINT` | unset | Off-site backups: the bucket's S3 endpoint, an `https` origin with no path (R2: `https://<account-id>.r2.cloudflarestorage.com`). Off-site backups run only when this and the next three are all set; setting only some of them refuses to boot. See [Off-site backups](#off-site-backups-to-cloudflare-r2). |
-| `BACKUP_S3_BUCKET` | unset | Bucket name (3-63 lowercase letters, digits, `-` and `.`). |
+| `BACKUP_S3_BUCKET` | unset | Bucket name (3-63 lowercase letters, digits, `-` and `.`, starting and ending with a letter or digit). |
 | `BACKUP_S3_ACCESS_KEY_ID` | unset | Access Key ID of the R2 API token. |
 | `BACKUP_S3_SECRET_ACCESS_KEY` | unset | Secret Access Key of the R2 API token. Never logged. |
-| `BACKUP_S3_REGION` | `auto` | Signing region (`auto` is what R2 expects). |
-| `BACKUP_S3_PREFIX` | `notes-backups/` | Folder (key prefix) in the bucket; a trailing `/` is added, no leading `/` or `..`. |
+| `BACKUP_S3_REGION` | `auto` | Signing region (`auto` is what R2 expects; lowercase letters, digits and `-`). |
+| `BACKUP_S3_PREFIX` | `notes-backups/` | Folder (key prefix) in the bucket: letters, digits, `.`, `_`, `-` and `/`; a trailing `/` is added; no leading `/`, no `//` and no `..`. |
 | `BACKUP_INTERVAL_HOURS` | `24` | Back up when the last successful scheduled upload is at least this many hours old (1-168). |
 | `BACKUP_KEEP_DAYS` | `30` | Delete backups older than this many days (1-3650), but always keep the newest 7. |
-| `RESTORE_ABORT` | unset | `1`/`true`: at the next start, discard a restore staged by `npm run restore:offsite` instead of applying it (a swap already in progress is rolled back first). Unset it again afterwards; while it is set with nothing staged, every start logs a reminder. `0`/`false` is the same as unset. |
+| `RESTORE_ABORT` | unset | `1`/`true`: at the next start, discard a restore staged by `npm run restore:offsite` instead of applying it (a swap already in progress is rolled back first). Unset it again afterwards; while it is set with nothing staged, every start logs a reminder. `0`/`false` is the same as unset. Any other value (e.g. `yes`, `TRUE`) refuses to boot. |
 | `CLOUDFLARE_TUNNEL_TOKEN` | unset | `compose.tunnel.yml` only. |
 
 ## Development
@@ -289,7 +289,12 @@ Commands inside the container (from the same directory, with the same `-f` files
 ```sh
 docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run reset-password -- you@example.com
 docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run backup
+docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run backup:offsite    # with BACKUP_S3_* in .env
+docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run restore:offsite -- notes-backup-YYYYMMDD-HHMMSS
 ```
+
+(See [Off-site backups](#off-site-backups-to-cloudflare-r2) and
+[Restore from R2 with Docker Compose](#restore-from-r2-with-docker-compose-or-without-docker) for the last two.)
 
 ### Starting and stopping
 
@@ -340,7 +345,10 @@ e.g. `fra` Frankfurt, `ams` Amsterdam, `iad` Virginia).
 
    ```sh
    fly launch --copy-config --no-deploy --name <app> --region <region>
+   git commit -am "fly.toml: my app name and region"   # only the app name and region changed, no secrets
    ```
+
+   Committing keeps your `fly.toml` through later `git pull`s (see **Update** below).
 
 3. **Create the volume** (1 GB, same region). Fly warns that a single volume has no redundancy: answer
    yes. The data's safety net is the volume snapshots Fly takes daily plus the
@@ -362,8 +370,9 @@ e.g. `fra` Frankfurt, `ams` Amsterdam, `iad` Virginia).
    ```
 
    Moving an existing local install? Use its values from `.env` instead (`set -a; . ./.env; set +a`, then
-   the `fly secrets set` line above), so existing share links keep working; see
-   [Moving local notes to Fly.io](#moving-local-notes-to-flyio).
+   the `fly secrets set` line above), so expiring share links stay valid; see
+   [Moving local notes to Fly.io](#moving-local-notes-to-flyio). Links already sent still point at the
+   old address (the old `PUBLIC_ORIGIN`, not `https://<app>.fly.dev`), so share new ones.
 
 5. **Deploy** (Fly builds the image on its own builders; no local Docker needed):
 
@@ -396,11 +405,12 @@ e.g. `fra` Frankfurt, `ams` Amsterdam, `iad` Virginia).
 
 Day to day:
 
-- **Update** to newer code: `git pull`, then `fly deploy`.
+- **Update** to newer code: `git pull`, then `fly deploy`. Keep your changes to `fly.toml` (app name,
+  region, a raised quota) committed, so `git pull` merges them with upstream changes to the file.
 - **Logs**: `fly logs` (follows; `--no-tail` prints the recent lines and exits). **Status**: `fly status`.
 - **Commands inside the machine** run over `fly ssh console`, which logs in as **root**. Always put
   `setpriv --reuid=1000 --regid=1000 --clear-groups` in front, so the command runs as the app user and
-  every file it writes stays owned by uid 1000 (`restore:offsite` refuses to run as root). The
+  every file it writes stays owned by uid 1000 (`backup:offsite` and `restore:offsite` refuse to run as root). The
   `--prefix /app/apps/server` makes npm find the app wherever the session starts. For example, to reset
   a password (`--pty` because it prompts for the new password):
 
@@ -410,9 +420,12 @@ Day to day:
 
 - **Growing the volume**: attachments may use at most `UPLOAD_QUOTA_MB` (400 MB in `fly.toml`) per
   account. The quota stays at most **40% of the volume**, because restoring a backup needs room for the
-  old and the restored files side by side. To allow more, extend the volume first, then raise the quota
-  (2 GB → at most 819, 3 GB → at most 1228), and set `initial_size` in `fly.toml` to the new size too so
-  the file (and its test) stay consistent:
+  old and the restored files side by side. The quota is per account, so this assumes one account: with
+  more (`ALLOW_SIGNUP=true`), keep quota × accounts under 40%. To allow more, extend the volume first,
+  then raise the quota (2 GB → at most 819, 3 GB → at most 1228), and set `initial_size` in `fly.toml`
+  to the new size too so the file (and its test) stay consistent. The daily off-site backup builds its
+  snapshot (database + gzipped attachments) in the machine's temporary directory, outside the volume,
+  so a much larger quota also has to fit there:
 
   ```sh
   fly volumes list                                   # shows the volume's id (vol_…)
@@ -486,7 +499,11 @@ needs the same `SHARE_HMAC_KEY` for expiring share links to keep working).
 - One minute after start and then every hour, the server checks whether the last successful scheduled
   upload is at least `BACKUP_INTERVAL_HOURS` (24) old, and if so makes one. The time of the last success
   is kept in `/data/offsite-backup.json`, so a restart does not cause an extra backup. A failed upload is
-  logged and retried at the next hourly check.
+  logged and retried at the next hourly check; what that run had already uploaded is deleted again
+  (its `manifest.json` first, so a failed run never leaves a folder that looks complete).
+- While the app holds no notes, folders or attachments yet (a fresh install, e.g. one you are about to
+  restore into), no backup is made (`offsite backup skipped: no notes, folders or attachments yet`, logged
+  once): empty backups would push real ones out of the newest 7 that are always kept.
 - Log lines (`fly logs` on Fly): `offsite backup uploaded` (with the backup name and sizes),
   `offsite backup failed` (with the error), `old offsite backups pruned` (with the deleted names).
 - In the bucket (Cloudflare dashboard → R2 → your bucket), each backup is a folder
@@ -504,7 +521,8 @@ A restore replaces **all** notes, attachments and accounts with the backup's. It
 command downloads and verifies the backup while the app keeps running, and the next restart swaps it in.
 
 1. **Pick the backup**: in the Cloudflare dashboard, open the bucket's `notes-backups/` folder and choose
-   a `notes-backup-YYYYMMDD-HHMMSS` folder that contains `manifest.json` (usually the newest).
+   a `notes-backup-YYYYMMDD-HHMMSS` folder that contains `manifest.json` (usually the newest; the names
+   are UTC times).
 2. **Stage it** (the `BACKUP_S3_*` secrets must be set on the app):
 
    ```sh
@@ -515,7 +533,10 @@ command downloads and verifies the backup while the app keeps running, and the n
    the manifest and the database's integrity, unpacks the attachments, and only when everything checks
    out moves it to `/data/restore/` and prints `Backup … is verified and staged`. On any problem it
    prints why, removes what it downloaded, and the live data is untouched. Changes made in the app
-   after this step are lost once the restore is applied.
+   after this step are lost once the restore is applied. Only one `restore:offsite` runs at a time; if
+   the ssh session drops mid-download, just run it again (a half-finished `/data/restore-staging/` is
+   also removed at the next start; if it cannot be, for example because another user owns it, the app
+   still starts and logs `restore: could not remove …`: delete that directory by hand).
 
    **Free space**: the volume must have room for the backup's database and attachments next to the live
    data, plus 10%. If not, the command refuses and says how much is needed: extend the volume
@@ -551,7 +572,29 @@ one is refused until the first is applied or cancelled.
 **Restoring into a new Fly app** (the old app or account is gone): follow
 [Deploying to Fly.io](#deploying-to-flyio) with the `SESSION_SECRET` and `SHARE_HMAC_KEY` from your
 password manager, sign up (the restore replaces that account), set the `BACKUP_S3_*` secrets as in
-[Set it up](#set-it-up), then stage and apply the backup as above.
+[Set it up](#set-it-up), then stage and apply the backup as above. Do not create notes or folders in
+the new app before the restore: an empty app uploads no backups, so the bucket's newest backups stay
+the old app's until the restored data takes over. Expiring share links keep working with the same
+`SHARE_HMAC_KEY`, but links already sent point at the old app's address; share new ones.
+
+### Restore from R2 with Docker Compose or without Docker
+
+The same two steps work wherever the app runs. With Docker Compose (the `BACKUP_S3_*` settings in
+`.env`, the app running; use the `-f` override of your deployment in place of `compose.direct.yml`):
+
+```sh
+docker compose -f docker-compose.yml -f compose.direct.yml exec app npm run restore:offsite -- notes-backup-YYYYMMDD-HHMMSS
+docker compose -f docker-compose.yml -f compose.direct.yml restart app
+docker compose -f docker-compose.yml -f compose.direct.yml logs app | grep restore   # "restore: backup … is now the live data"
+```
+
+To cancel, add `RESTORE_ABORT=1` to `.env` and run `docker compose … up -d`; check the logs for
+`RESTORE_ABORT: discarded the staged restore`, then remove the line and run `up -d` again.
+
+Without Docker, run the command with the server's environment (`set -a; . ./.env; set +a`, after
+`npm run build -w apps/server` once) as the user the server runs as, then restart the server:
+`npm run restore:offsite -- notes-backup-YYYYMMDD-HHMMSS`. Cancel by starting the server once with
+`RESTORE_ABORT=1`. The free-space rule above applies to the disk holding `DATA_DIR`.
 
 ### Moving local notes to Fly.io
 
@@ -564,16 +607,18 @@ so the local app does not start its own daily backups into the same folder:
 export BACKUP_S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com BACKUP_S3_BUCKET=<bucket>
 read -rs BACKUP_S3_ACCESS_KEY_ID        # paste the Access Key ID, press Enter (not shown, not in history)
 read -rs BACKUP_S3_SECRET_ACCESS_KEY    # paste the Secret Access Key, press Enter
+export BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY
+# `-e NAME` without a value passes the exported value, so the secret never appears on a command line
 docker compose -f docker-compose.yml -f compose.direct.yml exec \
-  -e BACKUP_S3_ENDPOINT="$BACKUP_S3_ENDPOINT" -e BACKUP_S3_BUCKET="$BACKUP_S3_BUCKET" \
-  -e BACKUP_S3_ACCESS_KEY_ID="$BACKUP_S3_ACCESS_KEY_ID" -e BACKUP_S3_SECRET_ACCESS_KEY="$BACKUP_S3_SECRET_ACCESS_KEY" \
+  -e BACKUP_S3_ENDPOINT -e BACKUP_S3_BUCKET -e BACKUP_S3_ACCESS_KEY_ID -e BACKUP_S3_SECRET_ACCESS_KEY \
   app npm run backup:offsite
 ```
 
 It prints the backup's name. Then, with the Fly app deployed using the **same** `SESSION_SECRET` and
-`SHARE_HMAC_KEY` as the local `.env` (so existing share links keep working) and the `BACKUP_S3_*`
+`SHARE_HMAC_KEY` as the local `.env` (so expiring share links stay valid) and the `BACKUP_S3_*`
 secrets set, run steps 2 and 3 of [Restore on Fly.io](#restore-on-flyio) with that name. Use the `-f`
-override of your local deployment in place of `compose.direct.yml`.
+override of your local deployment in place of `compose.direct.yml`. Share links already sent point at
+the local install's address (its `PUBLIC_ORIGIN`), not `https://<app>.fly.dev`: share new ones.
 
 ## Backup and restore
 

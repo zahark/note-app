@@ -4,7 +4,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import fsp from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import { createServer as createNetServer, type AddressInfo, type Socket } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import type { Readable } from 'node:stream'
@@ -185,6 +185,42 @@ describe('putObjectFromFile', () => {
     expect(error).toMatchObject({ code: 'EntityTooLarge' })
     expect(requests).toHaveLength(0)
   })
+
+  it('reports the response of a server that answers before taking the whole body', async () => {
+    // a raw server that answers as soon as the request starts and then reads (and drops) the rest of the
+    // body, as S3 does for an early 403; Node's http server would reset the connection instead
+    const xml = s3ErrorXml('AccessDenied', 'Access Denied')
+    const sockets = new Set<Socket>()
+    const early = createNetServer((socket) => {
+      sockets.add(socket)
+      socket.once('data', () => {
+        socket.write(`HTTP/1.1 403 Forbidden\r\ncontent-type: application/xml\r\ncontent-length: ${Buffer.byteLength(xml)}\r\n\r\n${xml}`)
+      })
+      socket.resume()
+      socket.on('error', () => {})
+    })
+    await new Promise<void>((resolve) => early.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = early.address() as AddressInfo
+      const earlyTarget = { ...target, endpoint: new URL(`http://127.0.0.1:${port}`) }
+      const file = writeFile('big', randomBytes(8 * 1024 * 1024))
+      const error = await putObjectFromFile(earlyTarget, 'k/big', file, 'application/gzip').catch((e: unknown) => e)
+      expect(error).toBeInstanceOf(S3Error)
+      expect(error).toMatchObject({ status: 403, code: 'AccessDenied' })
+    } finally {
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolve) => early.close(() => resolve()))
+    }
+  })
+
+  it('fails when the file cannot be read after its size was taken', async () => {
+    // a directory stats fine but fails on the first read, like a file removed or unreadable mid-upload
+    const unreadable = path.join(dir, 'gone')
+    await fsp.mkdir(unreadable)
+    await expect(putObjectFromFile(target, 'k/gone', unreadable, 'application/gzip')).rejects.toMatchObject({
+      code: 'EISDIR',
+    })
+  })
 })
 
 describe('getObjectStream', () => {
@@ -246,10 +282,7 @@ describe('listObjects', () => {
 
     const objects = await listObjects(target, 'notes backups/')
 
-    expect(objects).toEqual([
-      { key: 'notes backups/a&b.db', size: 10, lastModified: new Date('2026-11-12T01:02:03.000Z') },
-      { key: 'notes backups/c<d>A', size: 20, lastModified: new Date('2026-11-13T04:05:06.000Z') },
-    ])
+    expect(objects).toEqual(['notes backups/a&b.db', 'notes backups/c<d>A'])
     expect(requests).toHaveLength(2)
     const first = new URL(requests[0]!.url, 'http://x')
     expect(first.pathname).toBe(`/${BUCKET}`)
@@ -280,10 +313,21 @@ describe('listObjects', () => {
     expect(requests.length).toBeLessThanOrEqual(2)
   })
 
-  it('refuses entries with a bad size or date', async () => {
-    handler = (_req, res) => res.writeHead(200).end(page(entry('p/a', -1, '2026-11-12T01:02:03.000Z')))
+  it('reads only the keys: an odd size or date on any entry does not stop the listing', async () => {
+    handler = (_req, res) => res.writeHead(200).end(page(entry('p/a', -1, 'yesterday') + entry('p/b', 1, '')))
+    expect(await listObjects(target, 'p/')).toEqual(['p/a', 'p/b'])
+  })
+
+  it('refuses an entry without a key', async () => {
+    handler = (_req, res) => res.writeHead(200).end(page('<Contents><Size>1</Size></Contents>'))
     await expect(listObjects(target, 'p/')).rejects.toMatchObject({ code: 'InvalidResponse' })
-    handler = (_req, res) => res.writeHead(200).end(page(entry('p/a', 1, 'yesterday')))
+  })
+
+  it('refuses a listing body over its size limit', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/xml' })
+      res.end(page(entry('p/a', 1, '2026-11-12T01:02:03.000Z').repeat(Math.ceil((8 * 1024 * 1024) / 150) + 10)))
+    }
     await expect(listObjects(target, 'p/')).rejects.toMatchObject({ code: 'InvalidResponse' })
   })
 })
@@ -395,7 +439,8 @@ describe('errors', () => {
         setTimeout(() => controller.abort(), 30)
         expect(await pending).toMatchObject({ name: 'AbortError' })
       }
-      // a signal that is already aborted sends nothing
+      // a signal that is already aborted sends nothing (the aborted requests above may still be arriving)
+      await new Promise((resolve) => setTimeout(resolve, 100))
       const before = requests.length
       const aborted = AbortSignal.abort()
       for (const call of calls) {

@@ -5,7 +5,12 @@
 #
 #   (a) Fly-like: a truly root-owned empty volume (`volume-nocopy`, so Docker does not copy the image's
 #       1000-owned /data into it), container started as root -> the entrypoint chowns /data to
-#       1000:1000 and the server runs as uid 1000 and answers /api/health
+#       1000:1000 and the server runs as uid/gid 1000 with no supplementary groups and answers
+#       /api/health; a restart on the already-chowned volume works the same
+#   (e) the README's Fly operator commands in (a)'s container, run from another directory as over
+#       `fly ssh console` (root): `setpriv … npm --prefix /app/apps/server run backup:offsite` finds the
+#       script and stops on the missing BACKUP_S3_* settings; `restore:offsite` as plain root refuses;
+#       nothing in /data ends up owned by anyone but uid 1000
 #   (b) Compose-like: `--user 1000:1000` on a normal named volume -> starts, /data stays 1000:1000
 #   (c) a file created through `docker exec` in (b) is owned by 1000
 #   (d) `docker compose config` resolves CLIENT_IP_HEADER (and, without an override, TRUST_PROXY) to
@@ -84,6 +89,29 @@ server_uid() {
   docker exec "$1" awk '/^Uid:/ { print $2 }' /proc/1/status
 }
 
+# server_gid_groups <container>: "<real gid> groups=<supplementary groups>" of PID 1
+server_gid_groups() {
+  docker exec "$1" awk '/^Gid:/ { gid = $2 } /^Groups:/ { $1 = ""; groups = $0 } END { gsub(/^ +| +$/, "", groups); print gid " groups=" groups }' /proc/1/status
+}
+
+# not_owned_by_app <container>: every path in /data not owned by 1000:1000 (empty when all are)
+not_owned_by_app() {
+  docker exec "$1" find /data \( -not -user 1000 -o -not -group 1000 \) -print
+}
+
+# expect_failure <what> <expected text> <command...>: the command must fail and print the text
+expect_failure() {
+  local what="$1" expected="$2" out
+  shift 2
+  if out="$("$@" 2>&1)"; then
+    fail "$what: expected a failure, got success: $out"
+  fi
+  case "$out" in
+    *"$expected"*) pass "$what fails with '$expected'" ;;
+    *) fail "$what: expected '$expected' in: $out" ;;
+  esac
+}
+
 echo "== building $IMAGE"
 docker build -q -t "$IMAGE" "$REPO_ROOT" >/dev/null
 
@@ -97,6 +125,25 @@ wait_healthy "$FLY_CONTAINER"
 assert_eq "$(docker exec "$FLY_CONTAINER" stat -c %u:%g /data)" "1000:1000" "(a) /data owner"
 assert_eq "$(server_uid "$FLY_CONTAINER")" "1000" "(a) server process uid"
 assert_eq "$(docker exec "$FLY_CONTAINER" stat -c %u:%g /data/notes.db)" "1000:1000" "(a) notes.db owner"
+assert_eq "$(server_gid_groups "$FLY_CONTAINER")" "1000 groups=" "(a) server process gid and groups"
+
+echo "== (e) the documented Fly operator commands, as root from another directory"
+SETPRIV=(setpriv --reuid=1000 --regid=1000 --clear-groups)
+expect_failure "(e) backup:offsite via setpriv + npm --prefix" "Off-site backups are not configured: set BACKUP_S3_ENDPOINT" \
+  docker exec -w / "$FLY_CONTAINER" "${SETPRIV[@]}" npm --prefix /app/apps/server run backup:offsite
+expect_failure "(e) restore:offsite via setpriv + npm --prefix" "Off-site backups are not configured: set BACKUP_S3_ENDPOINT" \
+  docker exec -w / "$FLY_CONTAINER" "${SETPRIV[@]}" npm --prefix /app/apps/server run restore:offsite -- notes-backup-20260101-000000
+expect_failure "(e) restore:offsite as root" "Refusing to run as root" \
+  docker exec -w / "$FLY_CONTAINER" npm --prefix /app/apps/server run restore:offsite -- notes-backup-20260101-000000
+expect_failure "(e) backup:offsite as root" "Refusing to run as root" \
+  docker exec -w / "$FLY_CONTAINER" npm --prefix /app/apps/server run backup:offsite
+assert_eq "$(not_owned_by_app "$FLY_CONTAINER")" "" "(e) paths in /data not owned by 1000:1000"
+
+echo "== (a) again: restart on the already-chowned volume"
+docker restart "$FLY_CONTAINER" >/dev/null
+wait_healthy "$FLY_CONTAINER"
+assert_eq "$(server_uid "$FLY_CONTAINER")" "1000" "(a) server process uid after restart"
+assert_eq "$(not_owned_by_app "$FLY_CONTAINER")" "" "(a) paths in /data not owned by 1000:1000 after restart"
 
 echo "== (b) Compose-like: --user 1000:1000 on a normal named volume"
 docker volume create "$COMPOSE_VOLUME" >/dev/null

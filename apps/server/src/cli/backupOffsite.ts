@@ -5,7 +5,14 @@ import { DB_FILE_NAME } from '../db/index.js'
 import { BackupError, UPLOADS_ARCHIVE_NAME } from '../services/backup.js'
 import { runOffsiteBackup } from '../services/offsiteBackup.js'
 import { S3Error } from '../services/s3.js'
-import { CliError, cliDataDir, cliOffsiteConfig, runIfInvokedDirectly, type OffsiteCliOptions } from './common.js'
+import {
+  CliError,
+  cliDataDir,
+  cliOffsiteConfig,
+  refuseRoot,
+  runIfInvokedDirectly,
+  type OffsiteCliOptions,
+} from './common.js'
 
 export interface BackupOffsiteOptions extends OffsiteCliOptions {
   /** Snapshot time (tests; default now). */
@@ -14,6 +21,8 @@ export interface BackupOffsiteOptions extends OffsiteCliOptions {
 
 /** The CLI (exported for tests): expected failures (config, no database, S3 errors) are `CliError`s. */
 export async function main(args: string[], options: BackupOffsiteOptions = {}): Promise<void> {
+  // as root, opening the live database could leave root-owned notes.db-wal/-shm the server cannot open
+  refuseRoot('backup:offsite')
   if (args.length > 0) throw new CliError('Usage: npm run backup:offsite')
   const cfg = cliOffsiteConfig(options)
   const dataDir = cliDataDir(options.env)

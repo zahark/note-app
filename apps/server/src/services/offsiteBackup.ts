@@ -4,18 +4,20 @@
 // removes the temp directory. Pruning lists the prefix and deletes old backups, but only ever runs after a
 // successful upload (see `scheduleOffsiteBackup` in app.ts), always keeps the newest complete ones, and
 // leaves keys it does not recognise alone. The state file `DATA_DIR/offsite-backup.json` records the last
-// successful scheduled upload; only the scheduler writes it.
+// successful scheduled upload; only the scheduler writes it. The scheduler skips a database that holds no
+// notes, folders or attachments yet (`holdsUserData`), so a fresh installation never fills the bucket with
+// empty backups that would push real ones out of the always-kept newest 7.
 //
 // Framework-free: the scheduler, its timers and its logging live in app.ts.
 import { createHash } from 'node:crypto'
-import { createReadStream, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createReadStream, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import type { OffsiteBackupConfig } from '../config.js'
-import { DB_FILE_NAME } from '../db/index.js'
-import { DAY_MS } from '../units.js'
+import { DB_FILE_NAME, type Db } from '../db/index.js'
+import { DAY_MS, HOUR_MS } from '../units.js'
 import { runBackup, UPLOADS_ARCHIVE_NAME } from './backup.js'
 import { deleteObject, listObjects, putObjectFromFile } from './s3.js'
 
@@ -29,6 +31,10 @@ export const BACKUP_NAME_PATTERN = /^notes-backup-(\d{4})(\d{2})(\d{2})-(\d{2})(
 export const KEEP_NEWEST_BACKUPS = 7
 /** An incomplete backup (no manifest) older than this is a failed upload and is deleted. */
 export const INCOMPLETE_BACKUP_MAX_AGE_MS = DAY_MS
+/** Prefix of the temp directory one run makes in `os.tmpdir()`. */
+export const OFFSITE_TEMP_PREFIX = 'notes-offsite-'
+/** A temp directory left this long is from a run that was killed (SIGKILL skips its cleanup). */
+export const STALE_TEMP_DIR_AGE_MS = HOUR_MS
 
 const BACKUP_FILES = [UPLOADS_ARCHIVE_NAME, DB_FILE_NAME, MANIFEST_NAME] as const
 type BackupFileName = (typeof BACKUP_FILES)[number]
@@ -89,9 +95,74 @@ async function digestFile(file: string): Promise<FileDigest> {
 }
 
 /**
+ * True when the database holds anything worth backing up: a note, a folder or an attachment. An account
+ * alone is not (a fresh installation right after sign-up, e.g. one about to restore a backup).
+ */
+export function holdsUserData(db: Db): boolean {
+  const row = db
+    .prepare(
+      'SELECT EXISTS(SELECT 1 FROM notes) OR EXISTS(SELECT 1 FROM folders) OR EXISTS(SELECT 1 FROM attachments)',
+    )
+    .pluck()
+    .get()
+  return row === 1
+}
+
+/**
+ * Removes `notes-offsite-*` temp directories in `tmpRoot` older than `STALE_TEMP_DIR_AGE_MS`: left by a run
+ * that was killed before its cleanup (a container restart keeps `/tmp`). Best effort; returns the names
+ * removed.
+ */
+export function sweepStaleOffsiteTempDirs(tmpRoot: string = os.tmpdir(), nowMs: number = Date.now()): string[] {
+  const removed: string[] = []
+  let names: string[]
+  try {
+    names = readdirSync(tmpRoot)
+  } catch {
+    return removed
+  }
+  for (const name of names) {
+    if (!name.startsWith(OFFSITE_TEMP_PREFIX)) continue
+    const dir = path.join(tmpRoot, name)
+    try {
+      const stats = statSync(dir)
+      if (!stats.isDirectory() || nowMs - stats.mtimeMs < STALE_TEMP_DIR_AGE_MS) continue
+      rmSync(dir, { recursive: true, force: true })
+      removed.push(name)
+    } catch {
+      // gone already, or not ours to remove
+    }
+  }
+  return removed
+}
+
+/**
+ * Deletes the objects of a failed run, best effort, the manifest first (like a prune): its PUT may have been
+ * stored although it reported a failure, and a manifest left next to deleted data would be a "complete"
+ * backup that cannot be restored and that takes one of the always-kept newest slots. When deleting the
+ * manifest fails, the data stays too (the backup is then either complete or one a later prune removes);
+ * 404 counts as deleted.
+ */
+async function deleteAttempted(cfg: OffsiteBackupConfig, keys: string[]): Promise<void> {
+  const manifest = keys.find((key) => key.endsWith(`/${MANIFEST_NAME}`))
+  if (manifest !== undefined) {
+    try {
+      await deleteObject(cfg, manifest)
+    } catch {
+      return
+    }
+  }
+  for (const key of keys) {
+    if (key !== manifest) await deleteObject(cfg, key).catch(() => {})
+  }
+}
+
+/**
  * Makes a snapshot of `dataDir` and uploads it as `<prefix><name>/{uploads.tar.gz,notes.db,manifest.json}`,
  * in that order, so a backup without its manifest is known to be incomplete. The temp directory is removed
- * on success and on failure. Never touches the state file and never prunes.
+ * on success and on failure. When an upload fails (not on abort), every object this run tried to upload is
+ * deleted again (best effort; see `deleteAttempted`), so hourly retries of a failing run do not pile up
+ * full-size tarballs. Never touches the state file and never prunes.
  */
 export async function runOffsiteBackup(
   dataDir: string,
@@ -99,7 +170,10 @@ export async function runOffsiteBackup(
   { now = new Date(), tmpRoot = os.tmpdir(), signal }: RunOffsiteBackupOptions = {},
 ): Promise<OffsiteBackupResult> {
   signal?.throwIfAborted()
-  const tmp = await fsp.mkdtemp(path.join(tmpRoot, 'notes-offsite-'))
+  const tmp = await fsp.mkdtemp(path.join(tmpRoot, OFFSITE_TEMP_PREFIX))
+  // every key whose PUT started: a PUT that failed on our side (a timeout or a reset before the answer, a
+  // 5xx after the write) may still have stored the object
+  const attempted: string[] = []
   try {
     const backup = await runBackup({ dataDir, outDir: tmp, now })
     const name = path.basename(backup.dir)
@@ -118,10 +192,23 @@ export async function runOffsiteBackup(
     const manifestPath = path.join(tmp, MANIFEST_NAME)
     await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
-    signal?.throwIfAborted()
-    await putObjectFromFile(cfg, backupKey(cfg, name, UPLOADS_ARCHIVE_NAME), backup.archivePath, 'application/gzip', signal)
-    await putObjectFromFile(cfg, backupKey(cfg, name, DB_FILE_NAME), backup.dbPath, 'application/vnd.sqlite3', signal)
-    await putObjectFromFile(cfg, backupKey(cfg, name, MANIFEST_NAME), manifestPath, 'application/json', signal)
+    const uploads: Array<[BackupFileName, string, string]> = [
+      [UPLOADS_ARCHIVE_NAME, backup.archivePath, 'application/gzip'],
+      [DB_FILE_NAME, backup.dbPath, 'application/vnd.sqlite3'],
+      [MANIFEST_NAME, manifestPath, 'application/json'],
+    ]
+    try {
+      for (const [file, filePath, contentType] of uploads) {
+        signal?.throwIfAborted()
+        const key = backupKey(cfg, name, file)
+        attempted.push(key)
+        await putObjectFromFile(cfg, key, filePath, contentType, signal)
+      }
+    } catch (err) {
+      // on shutdown there is no time for this; the next successful run's prune removes the rest after a day
+      if (!signal?.aborted) await deleteAttempted(cfg, attempted)
+      throw err
+    }
     return { name, files }
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
@@ -133,8 +220,7 @@ export function backupNameTime(name: string): Date | null {
   const m = BACKUP_NAME_PATTERN.exec(name)
   if (!m) return null
   const [y, mo, d, h, mi, s] = m.slice(1).map(Number) as [number, number, number, number, number, number]
-  const date = new Date(Date.UTC(y, mo - 1, d, h, mi, s))
-  return Number.isNaN(date.getTime()) ? null : date
+  return new Date(Date.UTC(y, mo - 1, d, h, mi, s))
 }
 
 interface ListedBackup {
@@ -165,24 +251,19 @@ function groupBackups(cfg: OffsiteBackupConfig, keys: string[]): ListedBackup[] 
   return [...backups.values()]
 }
 
-export interface PruneResult {
-  /** Names of the backups whose objects were deleted. */
-  deleted: string[]
-}
-
 /**
  * Deletes complete backups older than `keepDays` (by the time in their name) except the newest
  * `KEEP_NEWEST_BACKUPS` complete ones, and incomplete backups (no manifest) older than a day. Only keys of
  * the form `<prefix><backup name>/<backup file>` are ever deleted; a backup's manifest goes first, so an
  * interrupted prune leaves an incomplete backup that a later prune removes. A failed listing deletes nothing.
+ * Returns the names of the backups deleted.
  */
 export async function pruneOffsiteBackups(
   cfg: OffsiteBackupConfig,
   now: Date,
   signal?: AbortSignal,
-): Promise<PruneResult> {
-  const listed = await listObjects(cfg, cfg.prefix, signal)
-  const backups = groupBackups(cfg, listed.map((o) => o.key))
+): Promise<string[]> {
+  const backups = groupBackups(cfg, await listObjects(cfg, cfg.prefix, signal))
   const complete = backups.filter((b) => b.complete).sort((a, b) => b.time.getTime() - a.time.getTime())
   const kept = new Set(complete.slice(0, KEEP_NEWEST_BACKUPS).map((b) => b.name))
   const keepMs = cfg.keepDays * DAY_MS
@@ -198,7 +279,7 @@ export async function pruneOffsiteBackups(
     for (const key of keys) await deleteObject(cfg, key, signal)
     deleted.push(backup.name)
   }
-  return { deleted }
+  return deleted
 }
 
 /** `DATA_DIR/offsite-backup.json`. */

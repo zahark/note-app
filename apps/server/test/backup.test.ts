@@ -136,6 +136,15 @@ describe('backup CLI', () => {
   })
 
   it('refuses extra arguments with its usage line', async () => {
-    await expect(backupMain(['a', 'b'])).rejects.toThrow(CliError)
+    const empty = tmpDataDir()
+    try {
+      vi.stubEnv('DATA_DIR', empty)
+      const err = await backupMain(['a', 'b']).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(CliError)
+      expect((err as Error).message).toMatch(/^Usage: npm run backup/)
+      expect(readdirSync(empty)).toEqual([])
+    } finally {
+      rmSync(empty, { recursive: true, force: true })
+    }
   })
 })

@@ -45,6 +45,8 @@ beforeEach(async () => {
   vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
     log.push(args.join(' '))
   })
+  // the CLI refuses to run as root; these tests must pass whoever runs them
+  vi.spyOn(process, 'getuid').mockReturnValue(1000)
 })
 
 afterEach(async () => {
@@ -57,6 +59,17 @@ const run = (args: string[] = [], env = backupEnv()) =>
   backupOffsiteMain(args, { env, endpoint: fake.endpoint, now: NOW })
 
 describe('backup:offsite CLI', () => {
+  it('refuses to run as root, before touching the database, and names the setpriv command', async () => {
+    vi.spyOn(process, 'getuid').mockReturnValue(0)
+    const err = await run().catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(CliError)
+    expect((err as Error).message).toContain(
+      'setpriv --reuid=1000 --regid=1000 --clear-groups npm --prefix /app/apps/server run backup:offsite',
+    )
+    expect(fake.requests).toEqual([])
+    expect(existsSync(path.join(dataDir, `${DB_FILE_NAME}-wal`))).toBe(false)
+  })
+
   it('uploads one backup with the BACKUP_* settings alone and prints its name', async () => {
     await run()
 

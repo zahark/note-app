@@ -60,10 +60,13 @@ function cliEnv(dir: string): NodeJS.ProcessEnv {
 /** Stages a backup into `dir` with the real CLI. */
 async function stageWithCli(dir: string, name: Stage): Promise<void> {
   const spy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  // the CLI refuses to run as root; these tests must pass whoever runs them
+  const uid = vi.spyOn(process, 'getuid').mockReturnValue(1000)
   try {
     await restoreOffsiteMain([name], { env: cliEnv(dir), endpoint: fake.endpoint })
   } finally {
     spy.mockRestore()
+    uid.mockRestore()
   }
 }
 
@@ -229,6 +232,31 @@ describe('applyStagedRestore: nothing staged', () => {
     expect(logs).toEqual([{ level: 'info', message: expect.stringMatching(/restore\/, restore-previous\//) }])
   })
 
+  it('deletes a restore-staging/ left by an interrupted restore:offsite run', () => {
+    const old = setUp('old data with uploads and WAL')
+    rmSync(restoreDir(), { recursive: true })
+    const staging = path.join(dataDir, 'restore-staging')
+    mkdirSync(path.join(staging, 'uploads'), { recursive: true })
+    writeFileSync(path.join(staging, DB_FILE_NAME), 'half a download')
+    writeFileSync(path.join(dataDir, 'restore-staging.lock'), `${2 ** 30}\n`) // its run was killed
+
+    expect(apply()).toBe('cleaned')
+    expect(existsSync(staging)).toBe(false)
+    expect(logs).toEqual([{ level: 'info', message: expect.stringContaining('restore-staging/') }])
+    rmSync(path.join(dataDir, 'restore-staging.lock'))
+    expect(tree(dataDir)).toEqual(old)
+  })
+
+  it('leaves restore-staging/ alone while a restore:offsite run holds the lock', () => {
+    const staging = path.join(dataDir, 'restore-staging')
+    mkdirSync(staging)
+    writeFileSync(path.join(staging, DB_FILE_NAME), 'downloading')
+    writeFileSync(path.join(dataDir, 'restore-staging.lock'), `${process.pid}\n`)
+
+    expect(apply()).toBe('none')
+    expect(readFileSync(path.join(staging, DB_FILE_NAME), 'utf8')).toBe('downloading')
+  })
+
   it('deletes a leftover restore-previous/ alone', () => {
     const old = setUp('old data with uploads and WAL')
     rmSync(restoreDir(), { recursive: true })
@@ -245,25 +273,99 @@ describe('applyStagedRestore: nothing staged', () => {
   })
 })
 
+describe('applyStagedRestore: a leftover that cannot be deleted', () => {
+  /** `fs.rmSync` of `dir` fails as for a directory owned by another user; everything else is deleted. */
+  function failRemoving(dir: string): void {
+    const rm = fs.rmSync
+    vi.spyOn(fs, 'rmSync').mockImplementation((target, options) => {
+      if (target === dir) throw Object.assign(new Error(`EACCES: permission denied, rmdir '${dir}'`), { code: 'EACCES' })
+      rm(target, options)
+    })
+  }
+
+  function leaveStaging(): string {
+    const staging = path.join(dataDir, 'restore-staging')
+    mkdirSync(path.join(staging, 'uploads'), { recursive: true })
+    writeFileSync(path.join(staging, DB_FILE_NAME), 'half a download')
+    return staging
+  }
+
+  it.each([false, true])('only warns about restore-staging/ and starts (RESTORE_ABORT %s)', (abort) => {
+    cpSync(oldDirs.get('old data with uploads and WAL')!, dataDir, { recursive: true })
+    const staging = leaveStaging()
+    const before = tree(dataDir)
+    failRemoving(staging)
+
+    expect(apply({ abort })).toBe('none')
+    expect(tree(dataDir)).toEqual(before)
+    expect(logs[0]).toEqual({ level: 'warn', message: expect.stringMatching(/could not remove .*restore-staging.*EACCES/) })
+    expect(logs.slice(1)).toEqual(abort ? [{ level: 'warn', message: expect.stringMatching(/RESTORE_ABORT.*unset/) }] : [])
+  })
+
+  it('removes the other leftovers, keeps the finished swap live, and a later restore still applies', async () => {
+    const layout = 'old data with uploads and WAL'
+    const steps = stepsOf(layout)
+    setUp(layout)
+    applyCrashingAt(steps.indexOf('removed restore/')) // the swap is complete; restore-previous/ is left
+    const restored = restoredTree()
+    expect(existsSync(previousDir())).toBe(true)
+    const staging = leaveStaging()
+    failRemoving(previousDir())
+    logs = []
+
+    expect(apply()).toBe('cleaned')
+    expect(existsSync(staging)).toBe(false)
+    const live = Object.fromEntries(Object.entries(tree(dataDir)).filter(([rel]) => !rel.startsWith('restore-previous')))
+    expect(live).toEqual(restored)
+    expect(usersOf()).toEqual([ALICE])
+    expect(logs).toEqual([
+      { level: 'warn', message: expect.stringMatching(/could not remove .*restore-previous.*EACCES/) },
+      { level: 'info', message: expect.stringContaining('(restore-staging/)') },
+    ])
+
+    // restore:offsite deletes the kept restore-previous/ before it stages, so the next swap starts clean
+    vi.restoreAllMocks()
+    await stageWithCli(dataDir, EMPTY_NAME)
+    expect(existsSync(previousDir())).toBe(false)
+    expect(apply()).toBe('restored')
+    expect(tree(dataDir)).toEqual(restoredTree(EMPTY_NAME))
+  })
+})
+
 describe('applyStagedRestore: a complete swap', () => {
   it('swaps the staged backup in, keeps the old data aside until the end, and the database opens restored', () => {
     const old = setUp('old data with uploads and WAL')
-    const fsync = vi.spyOn(fs, 'fsyncSync')
+    // which paths were fsynced since the previous step
+    const opened = new Map<number, string>()
+    const openSync = fs.openSync.bind(fs)
+    vi.spyOn(fs, 'openSync').mockImplementation((...args: Parameters<typeof fs.openSync>) => {
+      const fd = openSync(...args)
+      opened.set(fd, String(args[0]))
+      return fd
+    })
+    let synced: string[] = []
+    const fsyncSync = fs.fsyncSync.bind(fs)
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      synced.push(opened.get(fd) ?? `fd ${fd}`)
+      fsyncSync(fd)
+    })
     let previousAtCleanup: Tree | undefined
     const steps: string[] = []
+    const syncedPerStep: string[][] = []
     const outcome = apply({
       afterStep: (s) => {
         steps.push(s)
+        syncedPerStep.push(synced.sort())
+        synced = []
         if (s === 'removed restore/READY') previousAtCleanup = tree(previousDir())
       },
     })
 
     expect(outcome).toBe('restored')
-    // every rename was made durable (directories fsynced)
-    expect(fsync.mock.calls.length).toBeGreaterThanOrEqual(steps.length)
     // the old database, its WAL and SHM, and its uploads were all moved aside, untouched
     expect(previousAtCleanup).toEqual(old)
-    expect(steps.slice(0, 9)).toEqual([
+    // the old data is deleted only at the very end
+    expect(steps).toEqual([
       'created restore-previous/',
       'moved notes.db-wal to restore-previous/',
       'moved notes.db-shm to restore-previous/',
@@ -273,12 +375,23 @@ describe('applyStagedRestore: a complete swap', () => {
       'moved uploads into place',
       'removed restore/READY',
       'removed restore/',
+      'removed restore-previous/',
     ])
-    // the old data is deleted only at the very end
-    expect(steps.slice(9).sort()).toEqual(
-      ['notes.db', 'notes.db-shm', 'notes.db-wal', 'uploads', ''].map((e) => `removed restore-previous/${e}`).sort(),
-    )
-    expect(steps.at(-1)).toBe('removed restore-previous/')
+    // every change was made durable before the next one: both parent directories of each rename
+    const toPrevious = [dataDir, previousDir()].sort()
+    const intoPlace = [dataDir, restoreDir()].sort()
+    expect(syncedPerStep).toEqual([
+      [dataDir],
+      toPrevious,
+      toPrevious,
+      toPrevious,
+      intoPlace,
+      toPrevious,
+      intoPlace,
+      [restoreDir()],
+      [dataDir],
+      [dataDir],
+    ])
 
     expect(tree(dataDir)).toEqual(restoredTree())
     expect(Object.keys(restoredTree()).filter((p) => p.startsWith('uploads/'))).toHaveLength(2)
@@ -322,16 +435,19 @@ describe('applyStagedRestore: an incomplete or conflicting stage stops startup a
     expect(tree(dataDir)).toEqual(before)
   })
 
-  it('never overwrites a kept copy in restore-previous/', () => {
+  it('never overwrites a kept copy in restore-previous/, and RESTORE_ABORT then asks for a check by hand', () => {
     setUp('old data with uploads and WAL')
     mkdirSync(previousDir())
     writeFileSync(path.join(previousDir(), DB_FILE_NAME), 'kept')
-    const live = readFileSync(path.join(dataDir, DB_FILE_NAME))
+    const before = tree(dataDir)
 
     expect(() => apply()).toThrow(/already exists/)
+    expect(tree(dataDir)).toEqual(before)
+
+    // the kept copy is not one a swap made, so the rollback refuses to delete restore-previous/
+    expect(() => apply({ abort: true })).toThrow(/RESTORE_ABORT is set[\s\S]*check .* by hand/)
     expect(readFileSync(path.join(previousDir(), DB_FILE_NAME), 'utf8')).toBe('kept')
-    expect(readFileSync(path.join(dataDir, DB_FILE_NAME))).toEqual(live)
-    expect(existsSync(path.join(restoreDir(), 'READY'))).toBe(true)
+    expect(tree(dataDir)[DB_FILE_NAME]).toBe(before[DB_FILE_NAME])
   })
 })
 
@@ -406,6 +522,21 @@ describe('applyStagedRestore: RESTORE_ABORT', () => {
     expect(usersOf()).toEqual([BOB])
   })
 
+  it('a rollback that cannot finish asks for a check by hand and leaves the old data live', () => {
+    const layout = 'old data with uploads and WAL'
+    const steps = stepsOf(layout)
+    const old = setUp(layout)
+    applyCrashingAt(steps.indexOf('moved notes.db into place'))
+    writeFileSync(path.join(previousDir(), 'unexpected'), 'not from the swap')
+
+    expect(() => apply({ abort: true })).toThrow(/RESTORE_ABORT is set[\s\S]*check .* by hand/)
+
+    expect(readFileSync(path.join(previousDir(), 'unexpected'), 'utf8')).toBe('not from the swap')
+    const now = tree(dataDir)
+    for (const file of [DB_FILE_NAME, `${DB_FILE_NAME}-wal`, `${DB_FILE_NAME}-shm`]) expect(now[file]).toBe(old[file])
+    expect(usersOf()).toEqual([BOB])
+  })
+
   it('discards a stage whose READY is unreadable', () => {
     const old = setUp('old data with uploads and WAL')
     writeFileSync(path.join(restoreDir(), 'READY'), 'garbage')
@@ -467,10 +598,11 @@ describe('applyStagedRestore: two restores in a row', () => {
   ])('a second restore after the first was interrupted while deleting restore-previous/ (%s)', async (_label, start) => {
     const layout = 'old data with uploads and WAL'
     const steps = stepsOf(layout)
-    const deleting = steps.findIndex((s) => s.startsWith('removed restore-previous/'))
-    expect(deleting).toBeLessThan(steps.length - 1)
     setUp(layout)
-    applyCrashingAt(deleting) // one entry of restore-previous/ deleted, the rest still there
+    applyCrashingAt(steps.indexOf('removed restore/'))
+    // a crash in the middle of the recursive delete: part of restore-previous/ is gone, the rest is still there
+    rmSync(path.join(previousDir(), 'uploads'), { recursive: true })
+    rmSync(path.join(previousDir(), `${DB_FILE_NAME}-wal`))
     expect(existsSync(previousDir())).toBe(true)
 
     if (start) expect(apply()).toBe('cleaned')

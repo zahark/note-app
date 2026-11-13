@@ -11,8 +11,13 @@ import { DB_FILE_NAME } from '../db/index.js'
 
 /** A complete, verified stage waiting for the next start. */
 export const RESTORE_DIR = 'restore'
-/** Where the CLI assembles a stage; never read by the server (a leftover is removed by the next CLI run). */
+/**
+ * Where the CLI assembles a stage; never read by the server. A leftover of an interrupted run is removed by
+ * the next CLI run, or at the next start when no restore is armed and no CLI run holds the lock.
+ */
 export const RESTORE_STAGING_DIR = 'restore-staging'
+/** Held by `restore:offsite` while it stages (it holds the CLI's pid), so two runs never share a stage. */
+export const RESTORE_LOCK_FILE = 'restore-staging.lock'
 /** The live data moved aside during a swap. */
 export const RESTORE_PREVIOUS_DIR = 'restore-previous'
 /** Written last into the stage: its presence means "every staged file is verified and on disk". */
@@ -79,29 +84,45 @@ export class RestoreError extends Error {
   override name = 'RestoreError'
 }
 
-/** A problem with the stage itself, found before anything was changed. */
-class StageError extends Error {}
-
 /** Whether anything (file, directory or even a dangling symlink) is at `p`. */
 const present = (p: string): boolean => fs.lstatSync(p, { throwIfNoEntry: false }) !== undefined
 
 /** Renames `from` to `to` (never over something already there) and fsyncs both parent directories. */
 function move(from: string, to: string): void {
-  if (present(to)) throw new StageError(`${to} already exists; refusing to overwrite it with ${from}`)
+  if (present(to)) throw new Error(`${to} already exists; refusing to overwrite it with ${from}`)
   fs.renameSync(from, to)
   for (const dir of new Set([path.dirname(from), path.dirname(to)])) fsyncPath(dir)
 }
 
-/** Removes a directory one entry at a time (each a step), then the directory itself. */
+/**
+ * Removes a directory and everything in it. Interrupted half-way, what is left is still a leftover that the
+ * next start removes (the callers only remove directories that are no longer needed).
+ */
 function removeDir(dir: string, step: (what: string) => void): void {
-  const label = path.basename(dir)
-  for (const entry of fs.readdirSync(dir)) {
-    fs.rmSync(path.join(dir, entry), { recursive: true, force: true })
-    step(`removed ${label}/${entry}`)
-  }
-  fs.rmdirSync(dir)
+  fs.rmSync(dir, { recursive: true, force: true })
   fsyncPath(path.dirname(dir))
-  step(`removed ${label}/`)
+  step(`removed ${path.basename(dir)}/`)
+}
+
+/**
+ * The pid in `restore-staging.lock` when that process is still running, else `null` (no lock, or one left
+ * by a run that was killed).
+ */
+export function liveRestoreLockHolder(dataDir: string): number | null {
+  let pid: number
+  try {
+    pid = Number(fs.readFileSync(path.join(dataDir, RESTORE_LOCK_FILE), 'utf8').trim())
+  } catch {
+    return null
+  }
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null
+  try {
+    process.kill(pid, 0)
+    return pid
+  } catch (err) {
+    // EPERM: the process exists but belongs to another user
+    return (err as NodeJS.ErrnoException).code === 'EPERM' ? pid : null
+  }
 }
 
 function readReady(file: string): RestoreReady {
@@ -109,10 +130,10 @@ function readReady(file: string): RestoreReady {
   try {
     json = JSON.parse(fs.readFileSync(file, 'utf8'))
   } catch (err) {
-    throw new StageError(`${file} is not readable JSON: ${(err as Error).message}`)
+    throw new Error(`${file} is not readable JSON: ${(err as Error).message}`, { cause: err })
   }
   const parsed = readySchema.safeParse(json)
-  if (!parsed.success) throw new StageError(`${file} is not a valid restore marker`)
+  if (!parsed.success) throw new Error(`${file} is not a valid restore marker`)
   return parsed.data
 }
 
@@ -146,11 +167,29 @@ function apply(dataDir: string, { abort, log, afterStep }: ApplyRestoreOptions):
 
   if (!present(readyFile)) {
     // no restore armed: `restore/` without READY is a swap whose cleanup was interrupted (READY goes only
-    // once every item is in place), and `restore-previous/` without READY is superseded data
+    // once every item is in place, and a rollback removes `restore-previous/` before READY), so
+    // `restore-previous/` without READY is superseded data, and `restore-staging/` is what an interrupted
+    // `restore:offsite` left (unless one is running right now). The live data is complete either way, so a
+    // leftover that cannot be deleted (owned by another user, an I/O error) is only a warning: it must not
+    // keep the app from starting. `restore:offsite` deletes `restore-previous/` and `restore-staging/`
+    // itself before staging, and refuses while `restore/` exists, so a kept leftover never mixes into a swap.
+    const staging = path.join(dataDir, RESTORE_STAGING_DIR)
+    const leftovers = [staged, previous]
+    if (liveRestoreLockHolder(dataDir) === null) leftovers.push(staging)
     const removed: string[] = []
-    for (const dir of [staged, previous]) {
-      if (!present(dir)) continue
-      removeDir(dir, step)
+    for (const dir of leftovers) {
+      try {
+        if (!present(dir)) continue
+        fs.rmSync(dir, { recursive: true, force: true })
+        fsyncPath(dataDir)
+      } catch (err) {
+        log.warn(
+          `restore: could not remove ${dir}, left by an earlier restore (${(err as Error).message}); ` +
+            'the live data is not affected. Delete it by hand.',
+        )
+        continue
+      }
+      step(`removed ${path.basename(dir)}/`)
       removed.push(`${path.basename(dir)}/`)
     }
     if (removed.length > 0) log.info(`restore: removed the leftovers of an earlier restore (${removed.join(', ')})`)
@@ -207,23 +246,32 @@ function apply(dataDir: string, { abort, log, afterStep }: ApplyRestoreOptions):
   if (!present(previous)) {
     // the swap has not started: it only starts on a complete stage
     const db = fs.statSync(inStage(DB_FILE_NAME), { throwIfNoEntry: false })
-    if (!db?.isFile()) throw new StageError(`${inStage(DB_FILE_NAME)} is missing`)
+    if (!db?.isFile()) throw new Error(`${inStage(DB_FILE_NAME)} is missing`)
     if (db.size !== ready.notesDbSize) {
-      throw new StageError(`${inStage(DB_FILE_NAME)} is ${db.size} bytes, ${RESTORE_READY_FILE} says ${ready.notesDbSize}`)
+      throw new Error(`${inStage(DB_FILE_NAME)} is ${db.size} bytes, ${RESTORE_READY_FILE} says ${ready.notesDbSize}`)
     }
     if (!fs.statSync(inStage(UPLOADS), { throwIfNoEntry: false })?.isDirectory()) {
-      throw new StageError(`${inStage(UPLOADS)} is not a directory`)
+      throw new Error(`${inStage(UPLOADS)} is not a directory`)
     }
     fs.mkdirSync(previous)
     fsyncPath(dataDir)
     step(`created ${RESTORE_PREVIOUS_DIR}/`)
   }
 
+  // the old database's WAL/SHM go with it: a restored database must never replay the old WAL
+  const asideOf = (item: (typeof SWAP_ITEMS)[number]) => (item === DB_FILE_NAME ? [...DB_SIDE_FILES, item] : [item])
+  // a kept copy next to a live one cannot come from an interrupted swap: refuse before changing anything
+  for (const item of SWAP_ITEMS) {
+    if (!present(inStage(item))) continue
+    for (const old of asideOf(item)) {
+      if (present(live(old)) && present(kept(old))) {
+        throw new Error(`${kept(old)} already exists; refusing to overwrite it with ${live(old)}`)
+      }
+    }
+  }
   for (const item of SWAP_ITEMS) {
     if (!present(inStage(item))) continue // already swapped in
-    // the old database's WAL/SHM go with it: a restored database must never replay the old WAL
-    const aside = item === DB_FILE_NAME ? [...DB_SIDE_FILES, item] : [item]
-    for (const old of aside) {
+    for (const old of asideOf(item)) {
       if (!present(live(old))) continue
       move(live(old), kept(old))
       step(`moved ${old} to ${RESTORE_PREVIOUS_DIR}/`)

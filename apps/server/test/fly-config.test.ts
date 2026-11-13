@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 /**
  * Guards the security and sizing invariants of the repo's fly.toml (Fly.io deployment). The file is
- * read as text with a minimal TOML reader (tables, arrays of tables, `key = value`) - enough for the
+ * read as text with a minimal TOML reader (`[table]`, `[[table]]`, `key = value`) - enough for the
  * flat file we keep, and no TOML dependency just for one test.
  */
 
@@ -13,16 +13,14 @@ const FLY_TOML = path.resolve(import.meta.dirname, '../../../fly.toml')
 interface Entry {
   /** table the key belongs to: '' for the top level, `env`, `http_service.checks`, … */
   table: string
-  /** true when the table was opened with `[[…]]` */
-  arrayTable: boolean
   key: string
   /** raw value text, comment stripped */
   raw: string
-  line: number
 }
 
 interface ParsedToml {
-  tables: { name: string; arrayTable: boolean; line: number }[]
+  /** every table header's name, in file order (`[[vm]]` twice gives `vm` twice) */
+  tables: { name: string }[]
   entries: Entry[]
 }
 
@@ -47,21 +45,19 @@ function parseToml(text: string): ParsedToml {
   const tables: ParsedToml['tables'] = []
   const entries: Entry[] = []
   let table = ''
-  let arrayTable = false
   text.split(/\r?\n/).forEach((rawLine, index) => {
     const line = stripComment(rawLine).trim()
     if (line === '') return
-    const header = /^(\[\[?)\s*([A-Za-z0-9_.-]+)\s*\]\]?$/.exec(line)
+    const header = /^\[\[?\s*([A-Za-z0-9_.-]+)\s*\]\]?$/.exec(line)
     if (header) {
-      table = header[2] ?? ''
-      arrayTable = header[1] === '[['
-      tables.push({ name: table, arrayTable, line: index + 1 })
+      table = header[1] ?? ''
+      tables.push({ name: table })
       return
     }
     const kv = /^([A-Za-z0-9_-]+|"[^"]*")\s*=\s*(.+)$/.exec(line)
     if (!kv) throw new Error(`fly.toml:${index + 1}: unsupported line: ${rawLine}`)
     const key = (kv[1] ?? '').replace(/^"|"$/g, '')
-    entries.push({ table, arrayTable, key, raw: (kv[2] ?? '').trim(), line: index + 1 })
+    entries.push({ table, key, raw: (kv[2] ?? '').trim() })
   })
   return { tables, entries }
 }
@@ -98,10 +94,6 @@ describe('stripComment / parseToml', () => {
   it('keeps a # inside a quoted value and drops a trailing comment', () => {
     const toml = parseToml('[env]\n  A = "x#y" # comment\n# whole line\n[[vm]]\n  memory = "512mb"\n')
     expect(value(toml, 'env', 'A')).toBe('x#y')
-    expect(toml.tables).toEqual([
-      { name: 'env', arrayTable: false, line: 1 },
-      { name: 'vm', arrayTable: true, line: 4 },
-    ])
   })
 
   it('refuses lines it does not understand instead of silently skipping them', () => {

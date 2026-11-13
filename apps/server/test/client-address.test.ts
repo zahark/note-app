@@ -21,13 +21,16 @@ interface LogEntry {
   ip?: string
   ipKey?: string
   header?: string
+  req?: { remoteAddress?: string }
 }
+
+type Headers = Record<string, string | string[]>
 
 /** Sends `GET /api/health` from `remoteAddress` and returns every log entry it produced. */
 async function healthLog(
   env: Record<string, string>,
   remoteAddress: string,
-  headers: Record<string, string> = {},
+  headers: Headers = {},
   level = 'debug',
 ): Promise<LogEntry[]> {
   const lines: string[] = []
@@ -52,7 +55,7 @@ async function healthLog(
 async function clientAddress(
   env: Record<string, string>,
   remoteAddress: string,
-  headers: Record<string, string> = {},
+  headers: Headers = {},
   level = 'debug',
 ): Promise<{ ip: string | undefined; ipKey: string | undefined } | undefined> {
   const entry = (await healthLog(env, remoteAddress, headers, level)).find((e) => e.msg === 'client address')
@@ -120,10 +123,11 @@ describe('client address from CLIENT_IP_HEADER (Fly.io)', () => {
     expect(seen).toEqual({ ip: '203.0.113.7', ipKey: '203.0.113.7' })
   })
 
-  it.each([
+  it.each<[string, Headers]>([
     ['missing', {}],
     ['not an IP', { 'fly-client-ip': 'not-an-ip' }],
     ['an address list', { 'fly-client-ip': '203.0.113.7, 198.51.100.1' }],
+    ['repeated', { 'fly-client-ip': ['203.0.113.7', '198.51.100.1'] }],
     ['empty', { 'fly-client-ip': '' }],
   ])('a header that is %s falls back to the socket address, with a debug line', async (_label, headers) => {
     const entries = await healthLog(FLY, FLY_PROXY, { 'x-forwarded-for': '6.6.6.6', ...headers })
@@ -138,6 +142,13 @@ describe('client address from CLIENT_IP_HEADER (Fly.io)', () => {
     const entries = await healthLog(FLY, FLY_PROXY, {}, 'info')
     expect(entries.filter((e) => e.msg === FALLBACK || e.msg === 'client address')).toEqual([])
     expect(entries.filter((e) => e.level >= WARN)).toEqual([])
+  })
+
+  it('the info-level request log shows the header address, not the proxy', async () => {
+    const incoming = (entries: LogEntry[]) => entries.find((e) => e.msg === 'incoming request')?.req?.remoteAddress
+    expect(incoming(await healthLog(FLY, FLY_PROXY, { 'fly-client-ip': '203.0.113.7' }, 'info'))).toBe('203.0.113.7')
+    expect(incoming(await healthLog(FLY, FLY_PROXY, { 'fly-client-ip': 'bogus' }, 'info'))).toBe(FLY_PROXY)
+    expect(incoming(await healthLog({}, '192.0.2.5', { 'fly-client-ip': '203.0.113.7' }, 'info'))).toBe('192.0.2.5')
   })
 
   it('without CLIENT_IP_HEADER a Fly-Client-IP header is ignored', async () => {
@@ -174,5 +185,33 @@ describe('login limits keyed on CLIENT_IP_HEADER', () => {
     expect((await loginFrom(t.app, '::ffff:203.0.113.7', 'fresh@example.com')).statusCode).toBe(429)
     // another client behind the same proxy address is not
     expect((await loginFrom(t.app, '203.0.113.8', 'fresh@example.com')).statusCode).toBe(401)
+  })
+})
+
+describe('signup and PIN unlock limits keyed on CLIENT_IP_HEADER', () => {
+  let t: TestApp | undefined
+  afterEach(async () => {
+    if (t) await closeApp(t)
+    t = undefined
+  })
+
+  const from = (flyClientIp: string) => ({ remoteAddress: FLY_PROXY, headers: { origin: ORIGIN, 'fly-client-ip': flyClientIp } })
+
+  it('signups: two header values get separate per-IP limits', async () => {
+    t = await makeApp({ env: { ...FLY, ALLOW_SIGNUP: 'true' } })
+    const signupFrom = (ip: string, email: string) =>
+      t!.app.inject({ method: 'POST', url: '/api/auth/signup', ...from(ip), payload: { email, password: PASSWORD } })
+    for (let i = 0; i < 5; i++) expect((await signupFrom('203.0.113.7', `user${i}@example.com`)).statusCode).toBe(201)
+    expect((await signupFrom('203.0.113.7', 'fresh@example.com')).statusCode).toBe(429)
+    expect((await signupFrom('203.0.113.8', 'fresh@example.com')).statusCode).toBe(201)
+  })
+
+  it('PIN unlocks: two header values get separate per-IP limits', async () => {
+    t = await makeApp({ env: FLY })
+    const unlockFrom = (ip: string, noteId: string) =>
+      t!.app.inject({ method: 'POST', url: `/api/shared/${noteId}/unlock`, ...from(ip), payload: { pin: '1234' } })
+    for (let i = 0; i < 30; i++) expect((await unlockFrom('203.0.113.7', `note-${i}`)).statusCode).not.toBe(429)
+    expect((await unlockFrom('203.0.113.7', 'note-x')).statusCode).toBe(429)
+    expect((await unlockFrom('203.0.113.8', 'note-y')).statusCode).not.toBe(429)
   })
 })

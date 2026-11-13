@@ -8,6 +8,7 @@
 #   stays unset (the X-Forwarded-For layout on Fly is not something to count hops in).
 # - The volume is 1 GB (initial_size = "1gb" below) and UPLOAD_QUOTA_MB stays at most 40% of it
 #   (1 GB -> <= 409): restoring a backup needs room for the old and the new uploads side by side.
+#   The quota is per account, so this holds for one account; with more, keep quota x accounts <= 40%.
 #   Raise the quota only together with `fly volumes extend`.
 # - Secrets and app-specific values are not in this file; set them with
 #   `fly secrets set SESSION_SECRET=… SHARE_HMAC_KEY=… PUBLIC_ORIGIN=https://<app>.fly.dev`

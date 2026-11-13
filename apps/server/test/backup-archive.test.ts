@@ -59,6 +59,8 @@ interface RawEntry {
   prefix?: string
   /** Overrides the header's size field (the data written stays `data`). */
   size?: number
+  /** Writes this text into the size field as is (e.g. something that is not octal). */
+  sizeField?: string
   magic?: string
   badChecksum?: boolean
 }
@@ -71,7 +73,7 @@ function rawHeader(e: RawEntry): Buffer {
   header.write(octal(0o600, 8), 100, 8, 'ascii')
   header.write(octal(0, 8), 108, 8, 'ascii')
   header.write(octal(0, 8), 116, 8, 'ascii')
-  header.write(octal(e.size ?? e.data?.length ?? 0, 12), 124, 12, 'ascii')
+  header.write(e.sizeField ?? octal(e.size ?? e.data?.length ?? 0, 12), 124, 12, 'ascii')
   header.write(octal(0, 12), 136, 12, 'ascii')
   header.write('        ', 148, 8, 'ascii')
   header.write(e.type ?? '0', 156, 1, 'ascii')
@@ -194,6 +196,7 @@ describe('readUploadsArchive rejects', () => {
     ],
     ['a header with a bad checksum', [{ name: 'uploads/abc', data, badChecksum: true }], /checksum/],
     ['a non-ustar header', [{ name: 'uploads/abc', data, magic: 'nope\u0000\u0000' }], /ustar/],
+    ['a size field that is not octal', [{ name: 'uploads/abc', data, sizeField: '0000000009x\u0000' }], /corrupt size field/],
   ]
 
   it.each(rejected)('%s', async (_label, entries, message) => {
@@ -210,6 +213,17 @@ describe('readUploadsArchive rejects', () => {
       }),
     ).rejects.toThrow(BackupError)
     expect(names).toEqual(['ok'])
+  })
+
+  it('a zero block followed by a non-zero block (a corrupt end marker)', async () => {
+    const tar = Buffer.concat([
+      rawTar([{ name: 'uploads/abc', data }], false),
+      Buffer.alloc(BLOCK),
+      rawTar([{ name: 'uploads/def', data }]),
+    ])
+    const err = await readAll(streamOf(gzipSync(tar))).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(BackupError)
+    expect((err as Error).message).toMatch(/corrupt end marker/)
   })
 
   it('a tar without the end-of-archive marker', async () => {

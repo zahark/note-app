@@ -35,6 +35,9 @@ const sha256 = (data: Buffer) => createHash('sha256').update(data).digest('hex')
 const key = (name: string, file: string) => `${PREFIX}${name}/${file}`
 const staging = () => path.join(dataDir, 'restore-staging')
 const restore = () => path.join(dataDir, 'restore')
+const lockFile = () => path.join(dataDir, 'restore-staging.lock')
+/** A pid no process has (above every platform's pid limit). */
+const DEAD_PID = 2 ** 30
 
 function restoreEnv(): NodeJS.ProcessEnv {
   return {
@@ -85,6 +88,8 @@ beforeEach(async () => {
   vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
     log.push(args.join(' '))
   })
+  // the CLI refuses to run as root; these tests must pass whoever runs them
+  vi.spyOn(process, 'getuid').mockReturnValue(1000)
 })
 
 afterEach(async () => {
@@ -194,6 +199,45 @@ describe('restore:offsite CLI: success', () => {
       `GET ${key(NAME, 'uploads.tar.gz')}`,
     ])
     expect(log.join('\n')).toMatch(/restart/i)
+    expect(existsSync(lockFile())).toBe(false)
+  })
+
+  it('warns when the backup was made with attachment files already missing', async () => {
+    const dir = tmpDataDir()
+    try {
+      const db = openDataDb(dir)
+      const carol = seedUser(db, 'carol@example.com')
+      const gone = await storeUpload(db, dir, carol, { originalName: 'gone.png', data: PNG })
+      await storeUpload(db, dir, carol, { originalName: 'kept.png', data: BIG })
+      db.close()
+      rmSync(path.join(uploadsDir(dir), gone.storage_name))
+      const name = 'notes-backup-20261115-093015'
+      await runOffsiteBackup(dir, fake.config(), { now: new Date('2026-11-15T09:30:15.000Z') })
+      expect(manifestOf(name).missing).toEqual([gone.storage_name])
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      await run([name])
+
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/1 attachment files were already missing/))
+      expect(readdirSync(path.join(restore(), 'uploads'))).toHaveLength(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('stages when the free space is exactly what the restore needs', async () => {
+    const m = manifestOf()
+    const need = Math.ceil((m.files['notes.db'].size + m.uploads.bytes) * 1.1)
+    vi.spyOn(fsp, 'statfs').mockResolvedValue({ bavail: need, bsize: 1 } as Awaited<ReturnType<typeof fsp.statfs>>)
+    await run([NAME])
+    expect(existsSync(path.join(restore(), 'READY'))).toBe(true)
+  })
+
+  it('takes over a lock left by a run that was killed, and releases it', async () => {
+    writeFileSync(lockFile(), `${DEAD_PID}\n`)
+    await run([NAME])
+    expect(existsSync(path.join(restore(), 'READY'))).toBe(true)
+    expect(existsSync(lockFile())).toBe(false)
   })
 
   it('stages an empty uploads/ directory for a backup without attachments', async () => {
@@ -256,7 +300,9 @@ describe('restore:offsite CLI: refusals', () => {
   it('refuses to run as root and names the setpriv command', async () => {
     vi.spyOn(process, 'getuid').mockReturnValue(0)
     const err = await runFailing([NAME])
-    expect(err.message).toContain('setpriv --reuid=1000 --regid=1000 --clear-groups')
+    expect(err.message).toContain(
+      'setpriv --reuid=1000 --regid=1000 --clear-groups npm --prefix /app/apps/server run restore:offsite -- <name>',
+    )
     expect(fake.requests).toEqual([])
     expect(existsSync(restore())).toBe(false)
   })
@@ -285,9 +331,32 @@ describe('restore:offsite CLI: refusals', () => {
     expect(fake.requests).toEqual([])
   })
 
+  it('refuses while another run holds the lock, and leaves its lock and stage alone', async () => {
+    writeFileSync(lockFile(), `${process.pid}\n`)
+    mkdirSync(staging())
+    writeFileSync(path.join(staging(), DB_FILE_NAME), 'the other run')
+
+    const err = await runFailing([NAME])
+
+    expect(err.message).toContain(`Another restore:offsite (pid ${process.pid})`)
+    expect(fake.requests).toEqual([])
+    expect(readFileSync(lockFile(), 'utf8')).toBe(`${process.pid}\n`)
+    expect(readFileSync(path.join(staging(), DB_FILE_NAME), 'utf8')).toBe('the other run')
+  })
+
+  it('refuses when DATA_DIR does not exist', async () => {
+    rmSync(dataDir, { recursive: true, force: true })
+    const err = await runFailing([NAME])
+    expect(err.message).toMatch(/DATA_DIR .* does not exist/)
+    expect(fake.requests).toEqual([])
+    mkdirSync(dataDir) // for afterEach
+  })
+
   it('refuses with the extend-the-volume message when free space is short', async () => {
     const before = liveSnapshot()
-    vi.spyOn(fsp, 'statfs').mockResolvedValue({ bavail: 10, bsize: 4096 } as Awaited<ReturnType<typeof fsp.statfs>>)
+    const m = manifestOf()
+    const need = Math.ceil((m.files['notes.db'].size + m.uploads.bytes) * 1.1)
+    vi.spyOn(fsp, 'statfs').mockResolvedValue({ bavail: need - 1, bsize: 1 } as Awaited<ReturnType<typeof fsp.statfs>>)
 
     const err = await runFailing([NAME])
 
@@ -296,6 +365,7 @@ describe('restore:offsite CLI: refusals', () => {
     expect(fake.requests.map((r) => r.key)).toEqual([key(NAME, MANIFEST_NAME)])
     expect(existsSync(staging())).toBe(false)
     expect(existsSync(restore())).toBe(false)
+    expect(existsSync(lockFile())).toBe(false)
     expect(liveSnapshot()).toEqual(before)
   })
 
@@ -322,6 +392,23 @@ describe('restore:offsite CLI: refusals', () => {
     const err = await runFailing([NAME])
     expect(err.message).toMatch(/manifest/i)
   })
+
+  it('refuses an oversized manifest sent without Content-Length', async () => {
+    fake.intercept = (req, res) => {
+      if (req.key !== key(NAME, MANIFEST_NAME)) return false
+      res.writeHead(200) // chunked
+      res.end(Buffer.alloc(65 * 1024, 0x20))
+      return true
+    }
+    const err = await runFailing([NAME])
+    expect(err.message).toMatch(/manifest\.json is larger than \d+ bytes/)
+  })
+
+  it('refuses a manifest that is not JSON', async () => {
+    fake.put(key(NAME, MANIFEST_NAME), 'not json at all')
+    const err = await runFailing([NAME])
+    expect(err.message).toMatch(/manifest\.json of .* is not valid JSON/)
+  })
 })
 
 describe('restore:offsite CLI: a bad download stages nothing and leaves the live data alone', () => {
@@ -333,13 +420,22 @@ describe('restore:offsite CLI: a bad download stages nothing and leaves the live
   const body = (file: string) => fake.objects.get(key(NAME, file))!.body
 
   it.each([
-    ['notes.db size mismatch', () => fake.put(key(NAME, DB_FILE_NAME), Buffer.concat([body(DB_FILE_NAME), Buffer.from('x')])), /notes\.db/],
+    [
+      'notes.db larger than the manifest',
+      () => fake.put(key(NAME, DB_FILE_NAME), Buffer.concat([body(DB_FILE_NAME), Buffer.from('x')])),
+      /notes\.db is larger than/,
+    ],
+    [
+      'notes.db shorter than the manifest',
+      () => fake.put(key(NAME, DB_FILE_NAME), body(DB_FILE_NAME).subarray(0, -100)),
+      /notes\.db is \d+ bytes, the manifest says/,
+    ],
     ['notes.db SHA-256 mismatch', () => fake.put(key(NAME, DB_FILE_NAME), flipByte(body(DB_FILE_NAME), 200)), /notes\.db.*SHA-256/],
-    ['notes.db failing integrity_check', () => replaceFile('notes.db', corruptDatabase()), /notes\.db/],
+    ['notes.db failing integrity_check', () => replaceFile('notes.db', corruptDatabase()), /integrity check|not a usable database/],
     [
       'uploads.tar.gz size mismatch',
       () => fake.put(key(NAME, 'uploads.tar.gz'), Buffer.concat([body('uploads.tar.gz'), Buffer.alloc(10)])),
-      /uploads\.tar\.gz|archive/,
+      /uploads\.tar\.gz is larger than/,
     ],
     // the gzip header's mtime field: still valid gzip, different bytes
     ['uploads.tar.gz SHA-256 mismatch', () => fake.put(key(NAME, 'uploads.tar.gz'), flipByte(body('uploads.tar.gz'), 5)), /uploads\.tar\.gz.*SHA-256/],
@@ -380,6 +476,21 @@ describe('restore:offsite CLI: a bad download stages nothing and leaves the live
     expect(err.message).toMatch(/notes\.db is larger than/)
     expect(existsSync(staging())).toBe(false)
     expect(existsSync(restore())).toBe(false)
+  })
+
+  it('a connection that breaks mid-download is an operator error and stages nothing', async () => {
+    const full = body(DB_FILE_NAME)
+    fake.intercept = (req, res) => {
+      if (req.key !== key(NAME, DB_FILE_NAME)) return false
+      res.writeHead(200, { 'content-length': String(full.length) })
+      res.write(full.subarray(0, 1000), () => res.destroy())
+      return true
+    }
+    const err = await runFailing([NAME])
+    expect(err.message).toMatch(new RegExp(`^${NAME}: staging failed: `))
+    expect(existsSync(staging())).toBe(false)
+    expect(existsSync(restore())).toBe(false)
+    expect(existsSync(lockFile())).toBe(false)
   })
 
   it('a failed download (S3 error mid-restore) stages nothing', async () => {

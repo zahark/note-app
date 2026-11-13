@@ -2,8 +2,10 @@
 
 Self-hosted notes app: npm workspaces monorepo, `apps/server` (Fastify + TypeScript + better-sqlite3 +
 zod) serves `/api/*` and the built `apps/web` SPA (React + Vite + Tailwind + shadcn/ui + TipTap +
-TanStack Query) from one origin. All state lives in `DATA_DIR` (`notes.db` + `uploads/`). README.md
-covers setup, env vars, Docker, backup and password reset.
+TanStack Query) from one origin. All state lives in `DATA_DIR`: `notes.db` + `uploads/`, the off-site
+scheduler's `offsite-backup.json`, and during a restore `restore-staging/`, `restore/`,
+`restore-previous/` (+ `restore-staging.lock`). README.md covers setup, env vars, Docker, Fly.io,
+backups (local and off-site to R2), restore and password reset.
 
 ## Commands (repo root, Node 22+)
 
@@ -13,7 +15,9 @@ covers setup, env vars, Docker, backup and password reset.
 - `npm run test:docker` — `scripts/check-docker-image.sh`: builds the image as `notes-app:docker-check`
   and checks it with throwaway `notes-app-check-*` volumes/containers (Fly-like root start on a
   root-owned `volume-nocopy` volume, Compose-like `--user 1000:1000`, `docker exec` file ownership,
-  `docker compose config` pins `CLIENT_IP_HEADER` empty); removes everything on exit
+  `docker compose config` pins `CLIENT_IP_HEADER` empty, the README's Fly operator commands
+  `setpriv … npm --prefix /app/apps/server run backup:offsite|restore:offsite` and their root refusal,
+  a restart on the chowned volume); removes everything on exit (`KEEP_IMAGE=1` keeps the image)
 - `npm run build` / `npm run dev`
 - Single test file: `npm test -w apps/server -- test/move.test.ts`,
   `npm test -w apps/web -- src/features/tree/dnd.test.ts`
@@ -42,8 +46,8 @@ the 429; an outcome known only after an await (a password check) is `reserve`d f
 `buildApp(opts)` seams: `auth: {hasher, hashLimiter, now}` (fake hasher, hash limiter and clock; the
 share service shares them), `webDir` (serve a built SPA), `attachmentSweep` (the daily stray-upload
 sweep), `offsiteBackup` (the off-site backup scheduler, needs `config.offsiteBackup`). **Both are off
-by default and only `src/index.ts` turns them on; tests must never enable `attachmentSweep` against the
-default `./data`** — an in-memory test DB has no attachment rows, so the sweep would delete real uploads
+by default and only `prepareServer` (`src/startup.ts`, run by `src/index.ts`) turns them on; tests must
+never enable `attachmentSweep` against the default `./data`** — an in-memory test DB has no attachment rows, so the sweep would delete real uploads
 as strays. Timers and Fastify hooks stay in `app.ts` (`scheduleAttachmentSweep`,
 `scheduleOffsiteBackup`); `services/` stays framework-free. Server code never imports `cli/`. `test/helpers/auth.ts` `makeApp` also takes `onRoute` (hook
 installed before ready, used by the isolation coverage check) and `hashWaitMs`.
@@ -200,8 +204,11 @@ installed before ready, used by the isolation coverage check) and `hashWaitMs`.
 ## Tests
 
 - TDD; every code change ships with tests. Server helpers: `test/helpers/auth.ts` (`makeApp`,
-  `FakeClock`, `FakeHasher`, `seedUser`) and `test/helpers/api.ts` (`loginAs`, `api`). Mutating
-  requests must carry the exact `Origin` (`api` does this).
+  `FakeClock`, `FakeHasher`, `seedUser`), `test/helpers/api.ts` (`loginAs`, `api`) and
+  `test/helpers/fakeS3.ts` (stateful in-process S3: PUT/GET/ListObjectsV2/DELETE, an `intercept` hook
+  for errors and hangs; used with the off-site CLIs' `endpoint` test override). Mutating
+  requests must carry the exact `Origin` (`api` does this). Tests of the operator CLIs mock
+  `process.getuid` to 1000 (they refuse to run as root).
 - Time-dependent code takes an injectable clock/`now`; tests advance it instead of sleeping.
 - Web: Vitest + Testing Library, colocated `*.test.ts(x)` under `apps/web/src/features/{auth,tree,editor,share}`.
   Helpers in `apps/web/src/test/utils.tsx`: `mockFetch({"METHOD /path": response | handler})` stubs
@@ -229,10 +236,12 @@ See the README "Docker", "Deploying to Fly.io", "Off-site backups" and "Restore 
   started as root (Fly mounts root-owned empty volumes), chowns the top of `DATA_DIR` to 1000:1000 if
   needed and `exec`s the command through `setpriv --reuid=1000 --regid=1000 --clear-groups`; started as
   anyone else it just `exec`s. `docker-compose.yml` sets `user: "1000:1000"` (so `compose exec` is 1000
-  too). Operator commands over `fly ssh console` (root) must use the same `setpriv` prefix;
-  `restore:offsite` refuses to run as root.
+  too). Operator commands over `fly ssh console` (root) must use the same `setpriv` prefix (plus
+  `npm --prefix /app/apps/server`); `restore:offsite` and `backup:offsite` refuse to run as root
+  (`refuseRoot` in `cli/common.ts`).
 - Client address for the per-IP limits: `request.clientIp` (set once per request in an `onRequest` hook
-  by `clientIpOf`), never `request.ip`. With `CLIENT_IP_HEADER` (e.g. `Fly-Client-IP`) it is that
+  by `clientIpOf`), never `request.ip`. The `incoming request` log lines take `remoteAddress` the same
+  way (a `req` serializer added in `buildApp` when the logger is an options object). With `CLIENT_IP_HEADER` (e.g. `Fly-Client-IP`) it is that
   header's value when it is a single valid IP, else the socket address (fallback logged at debug only).
   `CLIENT_IP_HEADER` and a trusting `TRUST_PROXY` together are a `ConfigError`.
 - `TRUST_PROXY` and `CLIENT_IP_HEADER` are set explicitly (pinned empty) in the base `docker-compose.yml`
@@ -245,7 +254,8 @@ See the README "Docker", "Deploying to Fly.io", "Off-site backups" and "Restore 
   `[http_service]` on internal port 3000 with `force_https` (no `[[services]]`/`ports`), always on
   (`auto_stop_machines = "off"`, `min_machines_running = 1`), `/api/health` check, volume at `/data`,
   `512mb` (argon2: 5 × 64 MiB at peak), `CLIENT_IP_HEADER = "Fly-Client-IP"` and no `TRUST_PROXY`,
-  `UPLOAD_QUOTA_MB` ≤ 40% of `[mounts] initial_size` (restore room), and no secrets or `RESTORE_ABORT`.
+  `UPLOAD_QUOTA_MB` ≤ 40% of `[mounts] initial_size` (restore room; per account, so it assumes one),
+  and no secrets or `RESTORE_ABORT`.
 
 ## Backups (local and off-site) and restore
 
@@ -259,17 +269,28 @@ See the README "Docker", "Deploying to Fly.io", "Off-site backups" and "Restore 
   contain credentials. Config accepts only `https:` endpoints; `http:` exists for the test fake.
 - `config.offsiteBackup` comes from `parseOffsiteBackupConfig(env)` (the `BACKUP_*` rules only; all four
   required variables or none). The off-site CLIs use it via `cliOffsiteConfig` and need no server secrets.
-- `services/offsiteBackup.ts`: `runOffsiteBackup` snapshots into a temp dir under `os.tmpdir()` (never the
-  volume) and uploads `uploads.tar.gz`, `notes.db`, then `manifest.json` last (= complete).
+- `services/offsiteBackup.ts`: `runOffsiteBackup` snapshots into a temp dir `notes-offsite-*` under
+  `os.tmpdir()` (never the volume) and uploads `uploads.tar.gz`, `notes.db`, then `manifest.json` last
+  (= complete); on a failed upload (not on abort) it deletes every key whose PUT it started, best effort,
+  the manifest first (a PUT that failed client-side may still have been stored) and nothing else if that
+  delete fails, so a failed run never leaves a manifest without its data.
   `pruneOffsiteBackups` runs only after a successful scheduled upload: deletes complete backups older
   than `keepDays` but always keeps the newest 7, deletes incomplete ones older than a day, ages from the
-  backup name, ignores unknown keys. Only the scheduler writes `DATA_DIR/offsite-backup.json`
-  (`lastSuccessAt` = snapshot time); the `backup:offsite` CLI never writes it and never prunes.
+  backup name, ignores unknown keys, returns the deleted names. The scheduler skips a database without
+  notes, folders or attachments (`holdsUserData`: a fresh install must not push real backups out of the
+  newest 7), sweeps stale `notes-offsite-*` temp dirs at start, and redacts the key id/secret from logged
+  error messages. Only the scheduler writes `DATA_DIR/offsite-backup.json` (`lastSuccessAt` = snapshot
+  time); the `backup:offsite` CLI never writes it and never prunes.
 - Restore is two-phase, all inside `DATA_DIR` (layout names in `services/restore.ts`):
-  `restore:offsite <name>` (app running) verifies manifest, free space (+10%), sizes, SHA-256 and
-  `integrity_check` into `restore-staging/`, fsyncs, writes `READY` last and renames to `restore/`;
-  `applyStagedRestore` (called in `index.ts` before `openDataDb`) swaps with renames only, keeping the old
+  `restore:offsite <name>` (app running; holds `restore-staging.lock` with its pid, a dead holder's lock
+  is taken over) verifies manifest, free space (+10%), sizes, SHA-256 and `integrity_check` into
+  `restore-staging/`, fsyncs, writes `READY` last and renames to `restore/`; `applyStagedRestore` (called
+  by `prepareServer` in `startup.ts` before `openDataDb`, guarded by `test/startup.test.ts`; it also removes
+  a leftover `restore-staging/` unless a live CLI holds the lock) swaps with renames only, keeping the old
   `notes.db` + WAL/SHM + `uploads/` in `restore-previous/` until done. Every step is keyed on what is
   still staged, so a re-run after a crash converges; `RESTORE_ABORT` rolls a swap back, then discards
-  the stage. Any error stops startup (`RestoreError` with the `RESTORE_ABORT` hint). Tests simulate
-  crashes through the `afterStep` seam; keep the crash-at-every-step tests green when touching it.
+  the stage. With `READY` present any error stops startup (`RestoreError` with the `RESTORE_ABORT` hint);
+  without it (nothing armed, live data complete) removing the leftovers is best effort: a failure only
+  logs a warning and the app starts (the CLI clears `restore-previous/`/`restore-staging/` before
+  staging). Tests simulate crashes through the `afterStep` seam; keep the crash-at-every-step tests green
+  when touching it.

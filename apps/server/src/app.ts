@@ -25,11 +25,13 @@ import { AuthService } from './services/auth.js'
 import { ipKey } from './services/ipKey.js'
 import type { HashLimiter } from './services/hashLimiter.js'
 import {
+  holdsUserData,
   isOffsiteBackupDue,
   offsiteBackupTarget,
   pruneOffsiteBackups,
   readOffsiteState,
   runOffsiteBackup,
+  sweepStaleOffsiteTempDirs,
   writeOffsiteState,
 } from './services/offsiteBackup.js'
 import type { PasswordHasher } from './services/password.js'
@@ -121,14 +123,46 @@ declare module 'fastify' {
  */
 export function clientIpOf(request: FastifyRequest, clientIpHeader: string | null): string {
   if (clientIpHeader === null) return request.ip
-  const value = request.headers[clientIpHeader]
-  const candidate = typeof value === 'string' ? value.trim() : ''
-  if (isIP(candidate) !== 0) return candidate
+  const fromHeader = clientIpFromHeader(request, clientIpHeader)
+  if (fromHeader !== null) return fromHeader
   request.log.debug(
     { header: clientIpHeader, ip: request.ip },
     'client IP header missing or invalid, using the socket address',
   )
   return request.ip
+}
+
+/** The `clientIpHeader` value when it is a single valid IPv4/IPv6 literal, else `null`. */
+function clientIpFromHeader(request: FastifyRequest, clientIpHeader: string): string | null {
+  const value = request.headers[clientIpHeader]
+  const candidate = typeof value === 'string' ? value.trim() : ''
+  return isIP(candidate) !== 0 ? candidate : null
+}
+
+/**
+ * Fastify's own request log serializer with `remoteAddress` taken the way `clientIpOf` takes it, so the
+ * `incoming request` lines show the real client on Fly.io instead of the proxy's address. The serializer
+ * runs before the `onRequest` hook that sets `request.clientIp`, so it reads the header itself (silently).
+ */
+function requestLogSerializer(clientIpHeader: string | null) {
+  return (request: FastifyRequest) => ({
+    method: request.method,
+    url: request.url,
+    version: typeof request.headers['accept-version'] === 'string' ? request.headers['accept-version'] : undefined,
+    host: request.host,
+    remoteAddress:
+      (clientIpHeader === null ? null : clientIpFromHeader(request, clientIpHeader)) ?? request.ip,
+    remotePort: request.socket?.remotePort,
+  })
+}
+
+/** Adds `requestLogSerializer` to a logger options object (a caller's own `req` serializer wins). */
+function withRequestSerializer(
+  logger: FastifyServerOptions['logger'],
+  clientIpHeader: string | null,
+): FastifyServerOptions['logger'] {
+  if (typeof logger !== 'object' || logger === null) return logger
+  return { ...logger, serializers: { req: requestLogSerializer(clientIpHeader), ...logger.serializers } }
 }
 
 /**
@@ -161,7 +195,7 @@ export function buildApp({
   webDir,
 }: BuildAppOptions): FastifyInstance {
   const app = Fastify({
-    logger,
+    logger: withRequestSerializer(logger, config.clientIpHeader),
     trustProxy: fastifyTrustProxy(config.trustProxy),
     frameworkErrors: routerErrorHandler,
   })
@@ -203,7 +237,11 @@ export function buildApp({
 
   if (attachmentSweep) scheduleAttachmentSweep(app)
   if (offsiteBackup && config.offsiteBackup) {
-    scheduleOffsiteBackup(app, { dataDir: config.dataDir, cfg: config.offsiteBackup })
+    scheduleOffsiteBackup(app, {
+      dataDir: config.dataDir,
+      cfg: config.offsiteBackup,
+      holdsUserData: () => holdsUserData(db),
+    })
   }
 
   return app
@@ -307,26 +345,39 @@ export const OFFSITE_CHECK_INTERVAL_MS = HOUR_MS
 export interface OffsiteBackupSchedule {
   dataDir: string
   cfg: OffsiteBackupConfig
-  /** Clock in milliseconds (tests). */
-  now?: Clock
+  /** Whether the database holds anything worth backing up yet (`holdsUserData`). */
+  holdsUserData: () => boolean
+  /** Where runs make their temp directory and stale ones are swept (default `os.tmpdir()`; tests). */
+  tmpRoot?: string
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+/** An error's message for the off-site backup log lines, with the bucket credentials blanked out. */
+function redactedMessage(err: unknown, cfg: OffsiteBackupConfig): string {
+  let message = errorMessage(err)
+  for (const credential of [cfg.secretAccessKey, cfg.accessKeyId]) {
+    if (credential) message = message.split(credential).join('[redacted]')
+  }
+  return message
+}
+
 /**
  * Checks one minute after the app is ready and then hourly whether the last successful off-site backup
- * (the state file) is at least `cfg.intervalMs` old, and if so runs one. One run at a time; a failure is
- * logged and retried at the next hourly check. After a success it records the snapshot time in the state
- * file, then prunes old backups (a prune failure is logged and does not undo the success). `app.close()`
- * stops the timer, aborts an upload in flight and waits for that run to finish cleaning up. Log lines name
- * only the endpoint host, bucket and prefix, and errors by their message (never credentials). `run` and
- * `prune` are test seams.
+ * (the state file) is at least `cfg.intervalMs` old, and if so runs one. A database with no notes, folders
+ * or attachments is skipped (logged once): a fresh installation, e.g. one about to restore a backup, must
+ * not push real backups out of the always-kept newest ones. One run at a time; a failure is logged and
+ * retried at the next hourly check. After a success it records the snapshot time in the state file, then
+ * prunes old backups (a prune failure is logged and does not undo the success). At start it removes temp
+ * directories a killed run left behind. `app.close()` stops the timer, aborts an upload or prune in flight
+ * and waits for that run to finish cleaning up. Log lines name only the endpoint host, bucket and prefix,
+ * and errors by their message (never credentials). `run` and `prune` are test seams.
  */
 export function scheduleOffsiteBackup(
   app: FastifyInstance,
-  { dataDir, cfg, now = Date.now }: OffsiteBackupSchedule,
+  { dataDir, cfg, holdsUserData: hasData, tmpRoot }: OffsiteBackupSchedule,
   run: typeof runOffsiteBackup = runOffsiteBackup,
   prune: typeof pruneOffsiteBackups = pruneOffsiteBackups,
 ): void {
@@ -335,16 +386,22 @@ export function scheduleOffsiteBackup(
   const target = offsiteBackupTarget(cfg)
   let timer: NodeJS.Timeout | undefined
   let inFlight: Promise<void> | undefined
+  let skipLogged = false
 
   const check = async () => {
-    const startedAt = now()
+    const startedAt = Date.now()
     if (!isOffsiteBackupDue(readOffsiteState(dataDir), cfg.intervalMs, startedAt)) return
+    if (!hasData()) {
+      if (!skipLogged) app.log.info(target, 'offsite backup skipped: no notes, folders or attachments yet')
+      skipLogged = true
+      return
+    }
     let result: Awaited<ReturnType<typeof runOffsiteBackup>>
     try {
-      result = await run(dataDir, cfg, { now: new Date(startedAt), signal })
+      result = await run(dataDir, cfg, { now: new Date(startedAt), signal, tmpRoot })
     } catch (err) {
       if (signal.aborted) app.log.warn(target, 'offsite backup cancelled by shutdown')
-      else app.log.error({ ...target, error: errorMessage(err) }, 'offsite backup failed')
+      else app.log.error({ ...target, error: redactedMessage(err, cfg) }, 'offsite backup failed')
       return
     }
     app.log.info(
@@ -353,7 +410,7 @@ export function scheduleOffsiteBackup(
         name: result.name,
         notesDbBytes: result.files['notes.db'].size,
         uploadsArchiveBytes: result.files['uploads.tar.gz'].size,
-        durationMs: now() - startedAt,
+        durationMs: Date.now() - startedAt,
       },
       'offsite backup uploaded',
     )
@@ -361,13 +418,14 @@ export function scheduleOffsiteBackup(
       // the snapshot time, not the finish time, so the daily slot does not drift by the upload's duration
       writeOffsiteState(dataDir, { lastSuccessAt: new Date(startedAt).toISOString(), lastBackup: result.name })
     } catch (err) {
-      app.log.error({ error: errorMessage(err) }, 'offsite backup state file not written')
+      app.log.error({ error: redactedMessage(err, cfg) }, 'offsite backup state file not written')
     }
     try {
-      const { deleted } = await prune(cfg, new Date(now()), signal)
+      const deleted = await prune(cfg, new Date(), signal)
       if (deleted.length > 0) app.log.info({ ...target, deleted }, 'old offsite backups pruned')
     } catch (err) {
-      app.log.error({ ...target, error: errorMessage(err) }, 'offsite backup prune failed')
+      if (signal.aborted) app.log.warn(target, 'offsite backup prune cancelled by shutdown')
+      else app.log.error({ ...target, error: redactedMessage(err, cfg) }, 'offsite backup prune failed')
     }
   }
 
@@ -376,13 +434,15 @@ export function scheduleOffsiteBackup(
     timer.unref()
     if (inFlight || signal.aborted) return
     inFlight = check()
-      .catch((err: unknown) => app.log.error({ error: errorMessage(err) }, 'offsite backup check failed'))
+      .catch((err: unknown) => app.log.error({ error: redactedMessage(err, cfg) }, 'offsite backup check failed'))
       .finally(() => {
         inFlight = undefined
       })
   }
 
   app.addHook('onReady', async () => {
+    const swept = sweepStaleOffsiteTempDirs(tmpRoot)
+    if (swept.length > 0) app.log.info({ removed: swept }, 'removed temp directories of interrupted offsite backups')
     timer = setTimeout(tick, OFFSITE_FIRST_CHECK_MS)
     timer.unref()
   })

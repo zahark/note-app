@@ -1,12 +1,9 @@
-// Server entry point: validate config (refusing to boot on bad config), build the app, listen.
-import { existsSync } from 'node:fs'
-import path from 'node:path'
-import { buildApp, defaultWebDir } from './app.js'
+// Server entry point: validate config (refusing to boot on bad config), prepare the server (a staged
+// restore first, then the database and the app; see startup.ts), listen.
+import type { FastifyInstance } from 'fastify'
 import { ConfigError, loadConfig, type Config } from './config.js'
-import { openDataDb } from './db/index.js'
-import { offsiteBackupTarget } from './services/offsiteBackup.js'
-import { applyStagedRestore, RestoreError } from './services/restore.js'
-import { HOUR_MS } from './units.js'
+import { RestoreError } from './services/restore.js'
+import { prepareServer } from './startup.js'
 
 async function main(): Promise<void> {
   let config: Config
@@ -20,49 +17,17 @@ async function main(): Promise<void> {
     throw err
   }
 
-  // a restore staged by `restore:offsite` is swapped in (or, with RESTORE_ABORT, discarded) before the
-  // database opens; the app logger does not exist yet, so these few lines go to the console
+  let app: FastifyInstance
   try {
-    applyStagedRestore(config.dataDir, {
-      abort: config.restoreAbort,
-      log: { info: (message) => console.log(message), warn: (message) => console.warn(message) },
-    })
+    app = prepareServer(config)
   } catch (err) {
+    // the database was not opened; the message says how to cancel the restore
     if (err instanceof RestoreError) {
       console.error(err.message)
       process.exit(1)
     }
     throw err
   }
-
-  // opening the database runs any pending migrations, so the schema is current before listening
-  const db = openDataDb(config.dataDir)
-  // the built SPA is served from apps/web/dist when present; without it (e.g. `npm run dev`, where Vite
-  // serves the web app) the server answers the API only
-  const webDir = defaultWebDir()
-  const hasWebBuild = existsSync(path.join(webDir, 'index.html'))
-  const app = buildApp({
-    config,
-    db,
-    logger: { level: config.logLevel },
-    attachmentSweep: true,
-    offsiteBackup: config.offsiteBackup !== null,
-    webDir: hasWebBuild ? webDir : undefined,
-  })
-  app.addHook('onClose', async () => {
-    db.close()
-  })
-  app.log.info('notes-app server starting')
-  if (config.offsiteBackup) {
-    const { intervalMs, keepDays } = config.offsiteBackup
-    app.log.info(
-      { ...offsiteBackupTarget(config.offsiteBackup), intervalHours: intervalMs / HOUR_MS, keepDays },
-      'off-site backups on',
-    )
-  } else {
-    app.log.info('off-site backups off (BACKUP_S3_* not set)')
-  }
-  if (!hasWebBuild) app.log.warn(`no web build at ${webDir}; serving the API only`)
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {
