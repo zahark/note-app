@@ -341,20 +341,20 @@
 - Create: `fly.toml`
 - Create: `apps/server/test/fly-config.test.ts`
 
-- [ ] write `apps/server/test/fly-config.test.ts` first: reads the repo's `fly.toml` as text and asserts
+- [x] write `apps/server/test/fly-config.test.ts` first: reads the repo's `fly.toml` as text and asserts
       `internal_port = 3000` under `[http_service]`, `force_https = true`, no `[[services]]` section and
       no `ports` entries, `CLIENT_IP_HEADER = "Fly-Client-IP"` and no `TRUST_PROXY` in `[env]`, `[mounts]`
       destination `/data`, `[[vm]]` memory `512mb`, `auto_stop_machines = "off"`,
       `min_machines_running = 1`, a health check on `/api/health`, `UPLOAD_QUOTA_MB` ≤ 40% of the
       `initial_size` noted in the file's comment (1 GB → ≤ 409), and no secret-looking keys
       (`SESSION_SECRET`, `SHARE_HMAC_KEY`, `PUBLIC_ORIGIN`, `BACKUP_S3_`)
-- [ ] write `fly.toml`: `app = "notes-app-CHANGE-ME"` (comment: set by `fly launch --copy-config
+- [x] write `fly.toml`: `app = "notes-app-CHANGE-ME"` (comment: set by `fly launch --copy-config
       --name …`), `primary_region` placeholder with comment, `[build] dockerfile = "Dockerfile"`,
       `[env]` `CLIENT_IP_HEADER = "Fly-Client-IP"`, `UPLOAD_QUOTA_MB = "400"`, `LOG_LEVEL = "info"`;
       `[http_service]`, `[[http_service.checks]]`, `[mounts] source = "notes_data"` with
       `initial_size = "1gb"`, `[[vm]] size = "shared-cpu-1x"`, `memory = "512mb"`; header comments on why
       512 MB, why no `[[services]]`, and why the quota is ≤ 40% of the volume (restore room)
-- [ ] run tests - must pass before task 4
+- [x] run tests - must pass before task 4
 
 ### Task 4: Parse the off-site backup and restore settings
 

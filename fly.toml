@@ -1,0 +1,51 @@
+# Fly.io deployment of the notes app: one always-on machine serving https://<app>.fly.dev, all state on
+# the `notes_data` volume mounted at /data. Invariants guarded by apps/server/test/fly-config.test.ts.
+#
+# - 512 MB is the floor: argon2id uses 64 MiB per hash and up to 5 hashes run at once (4 general + 1
+#   owner-reserved slot), on top of ~50 MB for the server; a 256 MB machine would run out of memory.
+# - No [[services]] / `ports` of our own: Fly's HTTP proxy ([http_service]) must be the only client,
+#   because it sets Fly-Client-IP, which CLIENT_IP_HEADER trusts for the per-IP rate limits. TRUST_PROXY
+#   stays unset (the X-Forwarded-For layout on Fly is not something to count hops in).
+# - The volume is 1 GB (initial_size = "1gb" below) and UPLOAD_QUOTA_MB stays at most 40% of it
+#   (1 GB -> <= 409): restoring a backup needs room for the old and the new uploads side by side.
+#   Raise the quota only together with `fly volumes extend`.
+# - Secrets and app-specific values are not in this file; set them with
+#   `fly secrets set SESSION_SECRET=… SHARE_HMAC_KEY=… PUBLIC_ORIGIN=https://<app>.fly.dev`
+#   (and the BACKUP_S3_* settings for off-site backups).
+
+# set by `fly launch --copy-config --name <your-app> --no-deploy`
+app = "notes-app-CHANGE-ME"
+# the Fly region closest to you (`fly platform regions`); `fly launch` can change it
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  CLIENT_IP_HEADER = "Fly-Client-IP"
+  UPLOAD_QUOTA_MB = "400"
+  LOG_LEVEL = "info"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # always on: one machine, never stopped by the proxy (the backup scheduler runs inside it)
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  grace_period = "20s"
+  interval = "30s"
+  timeout = "5s"
+  method = "GET"
+  path = "/api/health"
+
+[mounts]
+  source = "notes_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
